@@ -165,7 +165,7 @@ def test_live_call_ledger_requires_gate_and_supports_finalize(
                 },
             )
 
-    monkeypatch.setattr("dxbrain.api.app.HttpxTransport", FakeTransport)
+    monkeypatch.setattr("dxbrain.api.routes.model_calls.HttpxTransport", FakeTransport)
     executed = client.post(
         f"/v1/model-calls/{call_id}/execute",
         headers={**root, "Idempotency-Key": "two-phase-execute"},

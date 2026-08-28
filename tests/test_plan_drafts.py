@@ -104,7 +104,7 @@ def test_plan_draft_requires_human_confirmation_and_is_idempotent(
                 },
             )
 
-    monkeypatch.setattr("dxbrain.api.app.HttpxTransport", FakeTransport)
+    monkeypatch.setattr("dxbrain.api.routes.model_calls.HttpxTransport", FakeTransport)
     call_id = prepared.json()["id"]
     assert client.post(
         f"/v1/model-calls/{call_id}/execute",
