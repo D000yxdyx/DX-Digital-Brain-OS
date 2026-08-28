@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -234,3 +237,124 @@ def test_live_call_ledger_requires_gate_and_supports_finalize(
         assert session.scalar(select(func.count()).select_from(ModelCall)) == 2
         assert session.scalar(select(func.count()).select_from(DomainEvent)) == 8
         assert session.scalar(select(func.count()).select_from(AuditEvent)) == 8
+
+
+def test_execute_prepared_is_race_safe_under_concurrent_retries(
+    session_factories, database_urls: tuple[str, str, str], monkeypatch
+) -> None:
+    """A client retry racing its own in-flight execute must not double-call the provider.
+
+    Regression test for the execute_prepared locking fix: before that fix, the
+    method read call.status with no lock before calling the provider adapter, so
+    two concurrent (or retried) calls with the same execution_key could both pass
+    the 'status == prepared' check and both fire a real, billed request before
+    either finalized. This drives two real threads through the same TestClient
+    against the same prepared model call and asserts the provider transport is
+    invoked exactly once.
+    """
+
+    _, _, migration_factory = session_factories
+    client = TestClient(
+        create_app(
+            Settings(
+                database_url=database_urls[0],
+                root_api_key="test-root-key",
+                deepseek_api_key="ds-secret",
+                llm_live_enabled=True,
+            )
+        )
+    )
+    root = {"X-DX-API-Key": "test-root-key"}
+    task = client.post(
+        "/v1/tasks",
+        headers={**root, "Idempotency-Key": "race-task"},
+        json={"title": "race condition target"},
+    )
+    task_id = task.json()["id"]
+    proposal = client.post(
+        f"/v1/tasks/{task_id}/proposals",
+        headers={**root, "Idempotency-Key": "race-proposal"},
+        json={
+            "objective": "Prepare a reviewed plan",
+            "rationale": "Concurrency contract",
+            "scope": {"side_effects": "none"},
+            "requested_capabilities": ["model.call"],
+            "plan": [{"title": "Plan", "capability": "model.call", "parameters": {}}],
+        },
+    )
+    proposal_id = proposal.json()["id"]
+    assert client.post(
+        f"/v1/proposals/{proposal_id}/reviews",
+        headers={**root, "Idempotency-Key": "race-review"},
+        json={"decision": "approve", "risk_level": "low", "reason": "sandbox contract"},
+    ).status_code == 201
+    assert client.post(
+        f"/v1/proposals/{proposal_id}/approvals",
+        headers={**root, "Idempotency-Key": "race-approval"},
+        json={
+            "scope": {"capabilities": ["model.call"], "side_effects": "none"},
+            "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        },
+    ).status_code == 201
+    prepared = client.post(
+        f"/v1/proposals/{proposal_id}/live-plan/prepare",
+        headers={**root, "Idempotency-Key": "race-prepare"},
+    )
+    assert prepared.status_code == 201
+    call_id = prepared.json()["id"]
+
+    call_count = 0
+    call_count_lock = threading.Lock()
+
+    class SlowFakeTransport:
+        def __call__(self, **_: object) -> TransportResponse:
+            nonlocal call_count
+            with call_count_lock:
+                call_count += 1
+            # Widen the race window: without the fix, a second thread can reach
+            # this line before either request finalizes. With the fix, a second
+            # thread blocks on the advisory lock and never reaches this at all.
+            time.sleep(0.3)
+            return TransportResponse(
+                status_code=200,
+                payload={
+                    "id": "ds-race-1",
+                    "model": "deepseek-chat",
+                    "choices": [{"message": {"role": "assistant", "content": "plan"}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+                },
+            )
+
+    monkeypatch.setattr("dxbrain.api.routes.model_calls.HttpxTransport", SlowFakeTransport)
+
+    execute_headers = {**root, "Idempotency-Key": "race-execute"}
+
+    def fire() -> dict:
+        response = client.post(f"/v1/model-calls/{call_id}/execute", headers=execute_headers)
+        return {"status_code": response.status_code, "body": response.json()}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future_a = pool.submit(fire)
+        future_b = pool.submit(fire)
+        result_a = future_a.result(timeout=10)
+        result_b = future_b.result(timeout=10)
+
+    assert call_count == 1, (
+        "the provider transport was invoked more than once for the same "
+        "execute_prepared retry -- the advisory lock did not serialize them"
+    )
+    assert result_a["status_code"] == 200
+    assert result_b["status_code"] == 200
+    assert result_a["body"]["status"] == "succeeded"
+    assert result_b["body"]["status"] == "succeeded"
+    replayed_flags = {result_a["body"]["replayed"], result_b["body"]["replayed"]}
+    assert replayed_flags == {True, False}, (
+        "exactly one of the two racing requests should be the original "
+        f"execution and the other a replay, got {replayed_flags}"
+    )
+
+    with migration_factory() as session:
+        row = session.get(ModelCall, call_id)
+        assert row is not None
+        assert row.status == "succeeded"
+        assert row.total_tokens == 14
