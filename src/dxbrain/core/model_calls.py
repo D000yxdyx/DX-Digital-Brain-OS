@@ -481,92 +481,122 @@ class ModelCallService:
         execution_key: str,
         transport: Transport,
     ) -> ModelCallView:
-        """Execute one prepared call and finalize it with a single external attempt."""
+        """Execute one prepared call and finalize it with a single external attempt.
 
+        Unlike the other state-mutating methods on this service, the critical
+        section here spans an outbound network call, so it cannot use the
+        usual transaction-scoped ``_lock`` (that lock is released as soon as
+        its transaction commits, which happens before the provider call would
+        even start). Instead this holds a session-scoped Postgres advisory
+        lock, keyed by model_call_id, for the entire duration of this method
+        -- including the network call -- so a retried or concurrent
+        execute_prepared() for the same model call can never both reach the
+        provider before either has finalized. The lock is released when this
+        method returns, whatever the outcome.
+        """
+
+        if not self._live_enabled:
+            raise ModelCallConflict("live model calls are disabled by configuration")
+
+        lock_key = f"model-call:execute:{model_call_id}"
         with self._session_factory() as session:
-            if not self._live_enabled:
-                raise ModelCallConflict("live model calls are disabled by configuration")
-            call = session.scalar(
-                select(ModelCall).where(ModelCall.id == model_call_id)
+            session.execute(
+                text("SELECT pg_advisory_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": lock_key},
             )
-            if call is None:
-                raise LookupError("model call not found")
-            finalize_key = f"execute:{execution_key}"
-            if call.status in ("succeeded", "failed"):
-                if call.finalize_idempotency_key == finalize_key:
-                    return self._view(call, replayed=True)
-                raise ModelCallConflict(f"cannot execute model call in status {call.status}")
-            if call.status != "prepared":
-                raise ModelCallConflict(f"cannot execute model call in status {call.status}")
-            if call.proposal_id is None:
-                raise ModelCallConflict("prepared model call has no proposal")
-            proposal = session.get(IntentProposal, call.proposal_id)
-            if proposal is None:
-                raise LookupError("proposal not found")
-            adapter = self._provider_registry.adapter(call.provider)  # type: ignore[arg-type]
-            request = ModelRequest(
-                model=call.model,
-                system=(
-                    "You are a planning assistant. Return a concise plan in plain text. "
-                    "Do not call tools or claim that any action was executed."
-                ),
-                messages=(
-                    ChatMessage(
-                        role="user",
-                        content=json.dumps(
-                            {
-                                "objective": proposal.objective,
-                                "rationale": proposal.rationale,
-                                "scope": proposal.scope,
-                                "requested_capabilities": proposal.requested_capabilities,
-                            },
-                            ensure_ascii=False,
+            session.commit()
+            try:
+                call = session.scalar(
+                    select(ModelCall).where(ModelCall.id == model_call_id)
+                )
+                if call is None:
+                    raise LookupError("model call not found")
+                finalize_key = f"execute:{execution_key}"
+                if call.status in ("succeeded", "failed"):
+                    if call.finalize_idempotency_key == finalize_key:
+                        return self._view(call, replayed=True)
+                    raise ModelCallConflict(
+                        f"cannot execute model call in status {call.status}"
+                    )
+                if call.status != "prepared":
+                    raise ModelCallConflict(
+                        f"cannot execute model call in status {call.status}"
+                    )
+                if call.proposal_id is None:
+                    raise ModelCallConflict("prepared model call has no proposal")
+                proposal = session.get(IntentProposal, call.proposal_id)
+                if proposal is None:
+                    raise LookupError("proposal not found")
+                adapter = self._provider_registry.adapter(call.provider)  # type: ignore[arg-type]
+                request = ModelRequest(
+                    model=call.model,
+                    system=(
+                        "You are a planning assistant. Return a concise plan in plain text. "
+                        "Do not call tools or claim that any action was executed."
+                    ),
+                    messages=(
+                        ChatMessage(
+                            role="user",
+                            content=json.dumps(
+                                {
+                                    "objective": proposal.objective,
+                                    "rationale": proposal.rationale,
+                                    "scope": proposal.scope,
+                                    "requested_capabilities": proposal.requested_capabilities,
+                                },
+                                ensure_ascii=False,
+                            ),
                         ),
                     ),
-                ),
-                max_tokens=512,
-                temperature=0,
-            )
+                    max_tokens=512,
+                    temperature=0,
+                )
 
-        started = time.perf_counter()
-        try:
-            result = adapter.complete(request, transport)
-        except Exception as error:  # provider failures become durable failed outcomes
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            return self.finalize_call(
-                model_call_id=model_call_id,
-                status="failed",
-                response_summary={"error": "provider call failed"},
-                input_tokens=0,
-                output_tokens=0,
-                total_tokens=0,
-                cost_usd=None,
-                latency_ms=latency_ms,
-                error_code=type(error).__name__[:64],
-                actor_type=actor_type,
-                actor_id=actor_id,
-                idempotency_key=f"execute:{execution_key}",
-            )
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        text = result.text[:20_000]
-        return self.finalize_call(
-            model_call_id=model_call_id,
-            status="succeeded",
-            response_summary={
-                "text": text,
-                "truncated": len(result.text) > len(text),
-                "request_id": result.request_id,
-            },
-            input_tokens=result.usage.input_tokens,
-            output_tokens=result.usage.output_tokens,
-            total_tokens=result.usage.total_tokens,
-            cost_usd=None,
-            latency_ms=latency_ms,
-            error_code=None,
-            actor_type=actor_type,
-            actor_id=actor_id,
-            idempotency_key=f"execute:{execution_key}",
-        )
+                started = time.perf_counter()
+                try:
+                    result = adapter.complete(request, transport)
+                except Exception as error:  # provider failures become durable failed outcomes
+                    latency_ms = int((time.perf_counter() - started) * 1000)
+                    return self.finalize_call(
+                        model_call_id=model_call_id,
+                        status="failed",
+                        response_summary={"error": "provider call failed"},
+                        input_tokens=0,
+                        output_tokens=0,
+                        total_tokens=0,
+                        cost_usd=None,
+                        latency_ms=latency_ms,
+                        error_code=type(error).__name__[:64],
+                        actor_type=actor_type,
+                        actor_id=actor_id,
+                        idempotency_key=f"execute:{execution_key}",
+                    )
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                truncated_text = result.text[:20_000]
+                return self.finalize_call(
+                    model_call_id=model_call_id,
+                    status="succeeded",
+                    response_summary={
+                        "text": truncated_text,
+                        "truncated": len(result.text) > len(truncated_text),
+                        "request_id": result.request_id,
+                    },
+                    input_tokens=result.usage.input_tokens,
+                    output_tokens=result.usage.output_tokens,
+                    total_tokens=result.usage.total_tokens,
+                    cost_usd=None,
+                    latency_ms=latency_ms,
+                    error_code=None,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    idempotency_key=f"execute:{execution_key}",
+                )
+            finally:
+                session.execute(
+                    text("SELECT pg_advisory_unlock(hashtextextended(:lock_key, 0))"),
+                    {"lock_key": lock_key},
+                )
+                session.commit()
 
     def live_readiness(self, proposal_id: UUID) -> ModelReadinessView:
         """Explain why a proposal can or cannot make a live planner call."""
