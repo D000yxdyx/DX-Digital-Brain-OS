@@ -45,6 +45,21 @@ class Settings(BaseSettings):
     llm_max_retries: int = Field(
         default=0, ge=0, le=3, validation_alias="DX_LLM_MAX_RETRIES"
     )
+    # Phase E.3A safety foundation. Exactly two new settings, and nothing about
+    # provider selection, timeouts or subprocess behaviour -- those belong to E.3B.
+    #
+    # agent_execution_enabled: the master switch. Absent -> False. A value that is not a
+    # boolean raises a normal configuration validation error; a malformed value is never
+    # silently coerced to False.
+    # agent_workspaces: the static symbolic workspace map consumed by WorkspaceResolver
+    # (``workspace_ref`` -> absolute directory). Absent -> empty map -> every reference is
+    # unknown and therefore denied.
+    agent_execution_enabled: bool = Field(
+        default=False, validation_alias="DX_AGENT_EXECUTION_ENABLED"
+    )
+    agent_workspaces: dict[str, str] = Field(
+        default_factory=dict, validation_alias="DX_AGENT_WORKSPACES"
+    )
 
     @property
     def control_ui_origin_list(self) -> list[str]:

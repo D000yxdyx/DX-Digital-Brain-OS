@@ -17,6 +17,12 @@ Lifecycle paths covered (frozen E.2A semantics):
 
 Unexpected exceptions (dispatch or collect) propagate with zero lifecycle writes; they
 are never converted into a lifecycle outcome.
+
+Phase E.3A adds the optional pre-dispatch guard to this module. The frozen E.2A test
+set above is untouched and still runs with ``guard=None``, which is the proof that the
+default path is byte-for-byte unchanged. The E.3A section below adds only: the master
+switch end-to-end, the guard-passing happy path, parametric guard denials, and the
+session/write discipline of the guard when it shares the Gateway's principal.
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from dxbrain.core.agent_executions import AgentExecutionService
 from dxbrain.core.models import (
+    Agent,
     AgentExecution,
     ApprovalGrant,
     AuditEvent,
@@ -65,6 +72,15 @@ from dxbrain.execution.fake import (
     FakeExecutionProvider,
 )
 from dxbrain.execution.gateway import ExecutionGateway
+from dxbrain.execution.guard import (
+    AGENT_IDENTITY_MISSING,
+    CAPABILITY_NOT_PERMITTED,
+    EXECUTION_DISABLED,
+    WORKSPACE_DENIED,
+    AgentExecutionGuard,
+    GuardDecision,
+)
+from dxbrain.execution.workspace import WorkspaceResolver
 
 _EXECUTION_DIR = Path(__file__).parents[1] / "src" / "dxbrain" / "execution"
 
@@ -198,8 +214,19 @@ def _seed_parents(factory) -> dict[str, Any]:
     return ids
 
 
-def _create_requested(factory, *, provider: str = "fake", idempotency_key: str | None = None):
-    """Seed parents and create one ``requested`` execution through the E.1 service."""
+def _create_requested(
+    factory,
+    *,
+    provider: str = "fake",
+    idempotency_key: str | None = None,
+    agent_id: UUID | None = None,
+    workspace_ref: str | None = "default",
+):
+    """Seed parents and create one ``requested`` execution through the E.1 service.
+
+    ``agent_id`` and ``workspace_ref`` default to the frozen E.2A values, so every
+    pre-existing call site keeps its exact behaviour.
+    """
 
     ids = _seed_parents(factory)
     service = AgentExecutionService(factory)
@@ -218,7 +245,8 @@ def _create_requested(factory, *, provider: str = "fake", idempotency_key: str |
         actor_type="system",
         actor_id="test",
         idempotency_key=idempotency_key or f"exec-{uuid4()}",
-        workspace_ref="default",
+        workspace_ref=workspace_ref,
+        agent_id=agent_id,
     )
 
 
@@ -650,5 +678,274 @@ def test_no_session_is_open_across_provider_calls(session_factories) -> None:
     result = gateway.handle_event(_requested_event_id(migration_factory, view.id))
 
     assert result == OUTCOME_SUCCEEDED
+    assert observed == [("dispatch", 0), ("collect", 0)]
+    assert spy.open_sessions == 0
+
+
+# --------------------------------------------------------------------------------------
+# Phase E.3A: the optional pre-dispatch guard, end to end through the Gateway
+# --------------------------------------------------------------------------------------
+
+
+def _seed_active_agent(factory, *, allowed_capabilities: tuple[str, ...] = ("agent.execution",)):
+    """Insert an already-active Agent, without going through the lifecycle service.
+
+    The row is written directly so the seeding leaves no ``DomainEvent`` /
+    ``AuditEvent`` / ``EventOutbox`` rows behind: the guard tests below assert exact
+    lifecycle write counts, and a fixture must not be mistaken for a DX write. The rule
+    being exercised -- ``AgentService.check_permission`` -- is still the real one.
+    """
+
+    task_id = uuid4()
+    agent_id = uuid4()
+    with factory.begin() as session:
+        session.add(Task(id=task_id, title="agent host"))
+        session.flush()
+        session.add(
+            Agent(
+                id=agent_id,
+                task_id=task_id,
+                name=f"gateway-agent-{agent_id}",
+                version="1",
+                role="executor",
+                contract={"input_schema": {}, "output_schema": {}, "side_effects": False},
+                allowed_capabilities=list(allowed_capabilities),
+                status="active",
+                actor_type="system",
+                actor_id="seed",
+                idempotency_key=f"seed-agent-{agent_id}",
+                request_hash="h",
+            )
+        )
+        session.flush()
+    return agent_id
+
+
+def _approval_id(factory) -> UUID:
+    with factory() as session:
+        return session.scalar(select(ApprovalGrant.id))
+
+
+def _grant_scope(factory, approval_id: UUID, scope: dict[str, Any]) -> None:
+    with factory.begin() as session:
+        session.get(ApprovalGrant, approval_id).scope = scope
+
+
+class _CountingProvider:
+    """Delegate to the deterministic Fake provider while counting the calls made."""
+
+    name = "fake"
+
+    def __init__(self, behavior: str = BEHAVIOR_SUCCEEDED) -> None:
+        self.dispatch_calls = 0
+        self.collect_calls = 0
+        self._inner = FakeExecutionProvider(behavior)
+
+    def dispatch(self, request: DispatchRequest) -> DispatchReceipt:
+        self.dispatch_calls += 1
+        return self._inner.dispatch(request)
+
+    def collect(self, receipt: DispatchReceipt) -> ExecutionOutcome:
+        self.collect_calls += 1
+        return self._inner.collect(receipt)
+
+
+class _CodelessDenyingGuard:
+    """A broken guard: it denies without supplying a classification."""
+
+    def check(self, **kwargs: Any) -> GuardDecision:
+        return GuardDecision(allowed=False, error_code=None, error_detail="broken guard")
+
+
+def _guard(
+    factory,
+    *,
+    enabled: bool = True,
+    workspace_dir: Path | None = None,
+) -> AgentExecutionGuard:
+    mapping = {"default": str(workspace_dir)} if workspace_dir is not None else {}
+    return AgentExecutionGuard(
+        factory, enabled=enabled, workspace_resolver=WorkspaceResolver(mapping)
+    )
+
+
+def test_master_switch_off_fails_before_any_provider_interaction(
+    session_factories, tmp_path: Path
+) -> None:
+    """The switch is below ``requested`` and above everything else: zero interaction."""
+
+    api_factory, _, migration_factory = session_factories
+    view = _create_requested(migration_factory)
+    provider = _CountingProvider()
+    gateway = ExecutionGateway(
+        api_factory, provider, guard=_guard(api_factory, enabled=False, workspace_dir=tmp_path)
+    )
+
+    result = gateway.handle_event(_requested_event_id(migration_factory, view.id))
+
+    assert result == f"failed:{EXECUTION_DISABLED}"
+    row = _row(migration_factory, view.id)
+    assert row.status == "failed"
+    assert row.dispatched_at is None
+    assert row.started_at is None
+    assert row.external_execution_id is None
+    assert row.error_code == EXECUTION_DISABLED
+    assert provider.dispatch_calls == 0
+    assert provider.collect_calls == 0
+    assert "agent_execution.dispatched.v1" not in _event_types(migration_factory)
+    assert "agent_execution.started.v1" not in _event_types(migration_factory)
+    assert _counts(migration_factory) == {"domain": 2, "audit": 2, "outbox": 2}
+
+
+def test_guard_passing_drives_the_full_lifecycle(session_factories, tmp_path: Path) -> None:
+    """All guard checks satisfied: the E.2A happy path is reached unchanged."""
+
+    api_factory, _, migration_factory = session_factories
+    agent_id = _seed_active_agent(migration_factory)
+    view = _create_requested(migration_factory, agent_id=agent_id)
+    provider = _CountingProvider()
+    gateway = ExecutionGateway(
+        api_factory, provider, guard=_guard(api_factory, workspace_dir=tmp_path)
+    )
+
+    result = gateway.handle_event(_requested_event_id(migration_factory, view.id))
+
+    assert result == OUTCOME_SUCCEEDED
+    row = _row(migration_factory, view.id)
+    assert row.status == "succeeded"
+    assert row.agent_id == agent_id
+    assert row.dispatched_at is not None
+    assert row.started_at is not None
+    assert row.finished_at is not None
+    assert row.external_execution_id == f"fake-{view.id}"
+    assert row.error_code is None
+    assert provider.dispatch_calls == 1
+    assert provider.collect_calls == 1
+    assert _event_types(migration_factory) == {
+        "agent_execution.requested.v1",
+        "agent_execution.dispatched.v1",
+        "agent_execution.started.v1",
+        "agent_execution.succeeded.v1",
+    }
+    assert _counts(migration_factory) == {"domain": 4, "audit": 4, "outbox": 4}
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("agent_identity_missing", id="agent-identity-missing"),
+        pytest.param("workspace_denied", id="workspace-denied"),
+        pytest.param("capability_not_permitted", id="capability-not-permitted"),
+    ],
+)
+def test_guard_denial_fails_without_dispatch_or_provider_call(
+    session_factories, tmp_path: Path, case: str
+) -> None:
+    """Every guard denial becomes one DX fact: requested -> failed, nothing else."""
+
+    api_factory, _, migration_factory = session_factories
+    expected_code = {
+        "agent_identity_missing": AGENT_IDENTITY_MISSING,
+        "workspace_denied": WORKSPACE_DENIED,
+        "capability_not_permitted": CAPABILITY_NOT_PERMITTED,
+    }[case]
+
+    if case == "agent_identity_missing":
+        view = _create_requested(migration_factory)
+    elif case == "workspace_denied":
+        agent_id = _seed_active_agent(migration_factory)
+        view = _create_requested(
+            migration_factory, agent_id=agent_id, workspace_ref="not-configured"
+        )
+    else:
+        agent_id = _seed_active_agent(migration_factory)
+        view = _create_requested(migration_factory, agent_id=agent_id)
+        _grant_scope(migration_factory, _approval_id(migration_factory), {"capabilities": ["x"]})
+
+    provider = _CountingProvider()
+    gateway = ExecutionGateway(
+        api_factory, provider, guard=_guard(api_factory, workspace_dir=tmp_path)
+    )
+
+    result = gateway.handle_event(_requested_event_id(migration_factory, view.id))
+
+    assert result == f"failed:{expected_code}"
+    row = _row(migration_factory, view.id)
+    assert row.status == "failed"
+    assert row.error_code == expected_code
+    assert row.error_detail
+    assert row.dispatched_at is None
+    assert row.started_at is None
+    assert row.external_execution_id is None
+    # Zero provider interaction.
+    assert provider.dispatch_calls == 0
+    assert provider.collect_calls == 0
+    # Zero dispatched event and zero running event.
+    assert "agent_execution.dispatched.v1" not in _event_types(migration_factory)
+    assert "agent_execution.started.v1" not in _event_types(migration_factory)
+    # The guard itself wrote nothing: the only two rows are the lifecycle facts.
+    assert _counts(migration_factory) == {"domain": 2, "audit": 2, "outbox": 2}
+
+
+def test_guard_denial_without_an_error_code_is_a_contract_violation(
+    session_factories, tmp_path: Path
+) -> None:
+    """A malformed decision raises; the Gateway never fabricates a classification."""
+
+    api_factory, _, migration_factory = session_factories
+    view = _create_requested(migration_factory)
+    provider = _CountingProvider()
+    gateway = ExecutionGateway(api_factory, provider, guard=_CodelessDenyingGuard())
+
+    with pytest.raises(ExecutionContractError):
+        gateway.handle_event(_requested_event_id(migration_factory, view.id))
+
+    row = _row(migration_factory, view.id)
+    assert row.status == "requested"
+    assert provider.dispatch_calls == 0
+    assert _counts(migration_factory) == {"domain": 1, "audit": 1, "outbox": 1}
+
+
+def test_guard_and_gateway_leave_no_session_open_across_provider_calls(
+    session_factories, tmp_path: Path
+) -> None:
+    """The guard shares the Gateway's principal, so its sessions are counted too."""
+
+    api_factory, _, migration_factory = session_factories
+    agent_id = _seed_active_agent(migration_factory)
+    view = _create_requested(migration_factory, agent_id=agent_id)
+    spy = _CountingSessionFactory(api_factory)
+    observed: list[tuple[str, int]] = []
+
+    class _RecordingProvider:
+        name = "fake"
+
+        def dispatch(self, request: DispatchRequest) -> DispatchReceipt:
+            observed.append(("dispatch", spy.open_sessions))
+            return DispatchReceipt(
+                handoff_attempted=True,
+                accepted=True,
+                external_execution_id=FakeExecutionProvider.external_execution_id(
+                    request.execution_id
+                ),
+            )
+
+        def collect(self, receipt: DispatchReceipt) -> ExecutionOutcome:
+            observed.append(("collect", spy.open_sessions))
+            return ExecutionOutcome(
+                receipt.external_execution_id, True, OUTCOME_SUCCEEDED, exit_code=0
+            )
+
+    guard = AgentExecutionGuard(
+        spy, enabled=True, workspace_resolver=WorkspaceResolver({"default": str(tmp_path)})
+    )
+    gateway = ExecutionGateway(spy, _RecordingProvider(), guard=guard)
+
+    result = gateway.handle_event(_requested_event_id(migration_factory, view.id))
+
+    assert result == OUTCOME_SUCCEEDED
+    # The guard really did open sessions (it is not a no-op on this path) ...
+    assert spy.created > 0
+    # ... and none of them is open when the provider is called.
     assert observed == [("dispatch", 0), ("collect", 0)]
     assert spy.open_sessions == 0

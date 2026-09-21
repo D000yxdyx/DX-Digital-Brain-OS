@@ -25,6 +25,15 @@ exception propagates with zero lifecycle writes -- no generic ``except Exception
 Event routing is a single explicit whitelist entry (``agent_execution.requested.v1``).
 E.1 also emits ``dispatched`` / ``started`` / ``succeeded`` / ``failed`` events; routing
 anything else to the Gateway would let its own writes re-trigger dispatch.
+
+Phase E.3A adds one optional collaborator: a ``PreDispatchGuard`` evaluates the six
+authority checks (master switch, exact approval, capability scope, agent identity,
+agent capability, workspace) after the ``requested`` check and the provider-name check,
+and before ``provider.dispatch()``. When it denies, the Gateway -- still the only
+lifecycle writer -- drives ``requested -> failed`` with the guard's classification, so
+a denied execution produces zero provider interaction, zero ``dispatched`` event and
+zero ``running`` event. With ``guard=None`` the E.2A behaviour is byte-for-byte
+unchanged.
 """
 
 from __future__ import annotations
@@ -47,6 +56,7 @@ from dxbrain.execution.contracts import (
     ExecutionProvider,
     ProviderCollectionError,
 )
+from dxbrain.execution.guard import PreDispatchGuard
 
 DEFAULT_ACTOR_TYPE = "system"
 DEFAULT_ACTOR_ID = "execution-gateway"
@@ -65,6 +75,8 @@ class ExecutionSnapshot:
     provider: str
     capability: str
     agent_role: str
+    agent_id: UUID | None
+    approval_id: UUID
     draft_id: UUID
     draft_revision: int
     workspace_ref: str | None
@@ -81,12 +93,16 @@ class ExecutionGateway:
         session_factory: sessionmaker[Session],
         provider: ExecutionProvider,
         *,
+        guard: PreDispatchGuard | None = None,
         actor_type: str = DEFAULT_ACTOR_TYPE,
         actor_id: str = DEFAULT_ACTOR_ID,
     ) -> None:
         self._session_factory = session_factory
         self._provider = provider
         self._service = AgentExecutionService(session_factory)
+        # Optional Phase E.3A safety foundation. ``guard=None`` preserves the frozen
+        # E.2A behaviour exactly, which is what the offline E.2 Fake runtime still uses.
+        self._guard = guard
         self._actor_type = actor_type
         self._actor_id = actor_id
 
@@ -128,6 +144,30 @@ class ExecutionGateway:
                 f"execution requested provider {snapshot.provider!r} but the gateway is "
                 f"wired to {self._provider.name!r}",
             )
+
+        # Phase E.3A: the last authority check before the outbound handoff. Skipped
+        # entirely when no guard is wired, so the frozen E.2A path is untouched. The
+        # guard is read-only and holds no session when it returns; the Gateway below
+        # remains the only lifecycle writer.
+        if self._guard is not None:
+            decision = self._guard.check(
+                execution_id=snapshot.id,
+                capability=snapshot.capability,
+                agent_id=snapshot.agent_id,
+                approval_id=snapshot.approval_id,
+                workspace_ref=snapshot.workspace_ref,
+            )
+            if not decision.allowed:
+                if not decision.error_code:
+                    # A denial without a classification is a broken guard, not a
+                    # governance outcome: raise rather than fabricate an error_code,
+                    # mirroring how a contract-violating provider receipt is handled.
+                    raise ExecutionContractError(
+                        "pre-dispatch guard denied the execution without an error_code"
+                    )
+                return self._fail(
+                    execution_id, decision.error_code, decision.error_detail
+                )
 
         request = DispatchRequest(
             execution_id=snapshot.id,
@@ -223,6 +263,8 @@ class ExecutionGateway:
                 provider=row.provider,
                 capability=row.capability,
                 agent_role=row.agent_role,
+                agent_id=row.agent_id,
+                approval_id=row.approval_id,
                 draft_id=row.draft_id,
                 draft_revision=row.draft_revision,
                 workspace_ref=row.workspace_ref,
