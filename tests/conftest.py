@@ -81,6 +81,7 @@ def clean_database(
             text(
                 "TRUNCATE dx_archive.lessons, dx_archive.retrospectives, "
                 "dx_archive.project_dossiers, dx_workflow.workflow_commands, "
+                "dx_workflow.agent_executions, "
                 "dx_workflow.workflow_steps, dx_workflow.workflow_runs, "
                 "dx_governance.workflow_handoffs, "
                 "dx_governance.plan_draft_revisions, dx_governance.plan_drafts, "

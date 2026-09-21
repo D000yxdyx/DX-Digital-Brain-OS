@@ -406,6 +406,85 @@ class WorkflowCommand(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AgentExecution(Base):
+    """Technical execution fact for an external agent/workforce provider invocation.
+
+    Canonical DX identity is ``id`` (UUID). ``external_execution_id`` is only a provider
+    correlation handle. Lifecycle is the frozen five-state machine
+    (requested -> dispatched -> running -> succeeded/failed); ``reported`` was removed in
+    E.0.1 because the AgentExecution -> Governance ExecutionReport linkage is deferred.
+    ``agent_id`` has no FK in Phase 1 (external providers may not map to dx_agent.agents).
+    """
+
+    __tablename__ = "agent_executions"
+    __table_args__ = (
+        UniqueConstraint(
+            "actor_type", "actor_id", "idempotency_key", name="uq_agent_execution_idempotency"
+        ),
+        CheckConstraint(
+            "status IN ('requested', 'dispatched', 'running', 'succeeded', 'failed')",
+            name="ck_agent_execution_status",
+        ),
+        CheckConstraint("draft_revision >= 1", name="ck_agent_execution_revision_positive"),
+        CheckConstraint(
+            "workspace_ref IS NULL OR workspace_ref ~ '^[a-z0-9][a-z0-9_-]*$'",
+            name="ck_agent_execution_workspace_ref_symbolic",
+        ),
+        Index("ix_agent_executions_task_created", "task_id", "created_at"),
+        Index("ix_agent_executions_step_status", "workflow_step_id", "status"),
+        Index("ix_agent_executions_proposal_created", "proposal_id", "created_at"),
+        {"schema": "dx_workflow"},
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("dx_core.tasks.id"), nullable=False)
+    proposal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("dx_governance.intent_proposals.id"), nullable=False
+    )
+    approval_id: Mapped[UUID] = mapped_column(
+        ForeignKey("dx_governance.approval_grants.id"), nullable=False
+    )
+    workflow_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("dx_workflow.workflow_runs.id"), nullable=False
+    )
+    workflow_step_id: Mapped[UUID] = mapped_column(
+        ForeignKey("dx_workflow.workflow_steps.id"), nullable=False
+    )
+    draft_id: Mapped[UUID] = mapped_column(
+        ForeignKey("dx_governance.plan_drafts.id"), nullable=False
+    )
+    draft_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    agent_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    capability: Mapped[str] = mapped_column(String(128), nullable=False)
+    workspace_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="requested")
+    request_input: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    constraints: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    external_execution_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifacts: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    log_references: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    result_tail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class Agent(Base):
     __tablename__ = "agents"
     __table_args__ = (
