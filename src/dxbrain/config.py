@@ -54,8 +54,21 @@ class Settings(BaseSettings):
 
 
 class WorkerSettings(BaseSettings):
-    """Configuration for the internal outbox worker's distinct database role."""
+    """Configuration for the internal outbox worker's distinct database role.
+
+    Two principals, never mixed:
+
+    * ``DX_WORKER_DATABASE_URL``     -> OutboxWorker, authenticated as ``dx_worker``.
+    * ``DX_EXECUTION_DATABASE_URL``  -> Execution Gateway, authenticated as ``dx_api``.
+
+    The second is optional and has NO fallback: when it is absent the Execution Gateway
+    is not wired at all and the worker keeps its original behaviour. The worker process
+    therefore never needs ``DX_ROOT_API_KEY``, and no GRANT is added to ``dx_worker``.
+    """
 
     model_config = SettingsConfigDict(case_sensitive=True, extra="ignore")
 
     database_url: str = Field(validation_alias="DX_WORKER_DATABASE_URL")
+    execution_database_url: str | None = Field(
+        default=None, validation_alias="DX_EXECUTION_DATABASE_URL"
+    )
