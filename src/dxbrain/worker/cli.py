@@ -5,8 +5,11 @@ from uuid import UUID
 
 from dxbrain.config import WorkerSettings
 from dxbrain.core.database import create_session_factory
+from dxbrain.execution.codex_cli import CodexCLIProvider
 from dxbrain.execution.fake import FakeExecutionProvider
 from dxbrain.execution.gateway import ExecutionGateway
+from dxbrain.execution.guard import build_pre_dispatch_guard
+from dxbrain.execution.workspace import WorkspaceResolver
 from dxbrain.worker.outbox import OutboxWorker
 
 
@@ -20,13 +23,42 @@ def build_execution_handler(settings: WorkerSettings) -> Callable[[UUID], None] 
     The Gateway is the only component that receives a session factory built from the
     execution URL; the worker's own factory is built from ``DX_WORKER_DATABASE_URL``
     and is never handed to the Gateway.
+
+    Phase E.3B wires the two things the E.3A safety foundation added but never connected
+    to this runtime:
+
+    * **the pre-dispatch guard**, always. ``guard=None`` is reserved for the offline E.2A
+      runtime and for tests; in the worker it is never None, because without it the
+      ``DX_AGENT_EXECUTION_ENABLED`` kill switch would be inert and every approval, agent
+      binding and workspace check would be skipped.
+    * **the real provider**, only when the switch is on. This is a two-branch choice
+      driven by the switch -- not a registry, not a provider dictionary and not a plug-in
+      framework. When the switch is on, ``CodexCLIProvider`` validates
+      ``DX_CODEX_EXECUTABLE`` in its constructor and raises, so a misconfigured real mode
+      stops the worker instead of silently decaying into the Fake provider.
     """
 
     if settings.execution_database_url is None:
         return None
+    execution_session_factory = create_session_factory(settings.execution_database_url)
+
+    # ONE resolver instance, shared by the guard's authority check and the provider's
+    # last-moment re-resolution immediately before Popen. WorkspaceResolver copies the
+    # mapping, so authority cannot be widened between the two calls.
+    workspace_resolver = WorkspaceResolver(settings.agent_workspaces)
+
+    if settings.agent_execution_enabled:
+        provider = CodexCLIProvider(
+            executable=settings.codex_executable,
+            workspace_resolver=workspace_resolver,
+        )
+    else:
+        provider = FakeExecutionProvider()
+
     gateway = ExecutionGateway(
-        create_session_factory(settings.execution_database_url),
-        FakeExecutionProvider(),
+        execution_session_factory,
+        provider,
+        guard=build_pre_dispatch_guard(settings, execution_session_factory),
     )
     return gateway.handle_event
 

@@ -353,9 +353,13 @@ def test_cli_gives_each_principal_its_own_session_factory(
             super().__init__(session_factory, consumer_name=consumer_name, handler=handler)
 
     class _RecordingGateway:
-        def __init__(self, session_factory, provider):
+        # E.3B: the Gateway now always receives the pre-dispatch guard. The parameter is
+        # explicit and optional so the frozen E.2B assertions below stay exactly as they
+        # were; only what the recorded double is able to receive has been widened.
+        def __init__(self, session_factory, provider, guard=None):
             captured["gateway_factory"] = session_factory
             captured["provider"] = provider
+            captured["guard"] = guard
 
         def handle_event(self, event_id: UUID) -> str:
             return "ignored:stub"

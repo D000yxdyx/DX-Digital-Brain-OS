@@ -79,6 +79,14 @@ class WorkerSettings(BaseSettings):
     The second is optional and has NO fallback: when it is absent the Execution Gateway
     is not wired at all and the worker keeps its original behaviour. The worker process
     therefore never needs ``DX_ROOT_API_KEY``, and no GRANT is added to ``dx_worker``.
+
+    Phase E.3B adds the three settings the worker runtime needs to build the pre-dispatch
+    guard and the real Codex provider. They carry the SAME environment aliases as their
+    ``Settings`` counterparts -- there is deliberately no second interpretation of
+    ``DX_AGENT_EXECUTION_ENABLED`` or ``DX_AGENT_WORKSPACES``, and no new namespace. They
+    are declared here because the worker must not be forced to load ``Settings``: doing so
+    would require ``DX_DATABASE_URL`` and ``DX_ROOT_API_KEY`` in the worker process, which
+    would spread the root credential into a second runtime for no benefit.
     """
 
     model_config = SettingsConfigDict(case_sensitive=True, extra="ignore")
@@ -86,4 +94,15 @@ class WorkerSettings(BaseSettings):
     database_url: str = Field(validation_alias="DX_WORKER_DATABASE_URL")
     execution_database_url: str | None = Field(
         default=None, validation_alias="DX_EXECUTION_DATABASE_URL"
+    )
+    agent_execution_enabled: bool = Field(
+        default=False, validation_alias="DX_AGENT_EXECUTION_ENABLED"
+    )
+    agent_workspaces: dict[str, str] = Field(
+        default_factory=dict, validation_alias="DX_AGENT_WORKSPACES"
+    )
+    # DX never discovers a Codex installation: real mode must name the approved native
+    # executable explicitly, and an unusable value fails fast during worker construction.
+    codex_executable: str | None = Field(
+        default=None, validation_alias="DX_CODEX_EXECUTABLE"
     )

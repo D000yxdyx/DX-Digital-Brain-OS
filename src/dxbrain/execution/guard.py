@@ -50,7 +50,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from dxbrain.config import Settings
+from dxbrain.config import Settings, WorkerSettings
 from dxbrain.core.agents import AgentService
 from dxbrain.core.models import ApprovalGrant
 from dxbrain.execution.workspace import WorkspaceDenied, WorkspaceResolver
@@ -238,9 +238,15 @@ class AgentExecutionGuard:
 
 
 def build_pre_dispatch_guard(
-    settings: Settings, session_factory: sessionmaker[Session]
+    settings: Settings | WorkerSettings, session_factory: sessionmaker[Session]
 ) -> AgentExecutionGuard:
-    """Compose the guard from configuration. The E.3B wiring point."""
+    """Compose the guard from configuration. The E.3B wiring point.
+
+    Accepts either settings object: the API process composes the guard from ``Settings``,
+    the worker process from ``WorkerSettings``. Both expose the same three fields under the
+    same environment aliases, so this is a type-only widening -- not a new configuration
+    abstraction, and not a second interpretation of the switch.
+    """
 
     return AgentExecutionGuard(
         session_factory,
