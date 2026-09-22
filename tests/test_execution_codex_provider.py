@@ -44,6 +44,7 @@ from dxbrain.execution.codex_cli import (
     WORKSPACE_DENIED,
     CodexCLIProvider,
     build_argv,
+    validate_mcp_server_name,
     validate_native_executable,
 )
 from dxbrain.execution.contracts import (
@@ -258,6 +259,96 @@ def test_build_argv_is_a_pure_function() -> None:
         str(workspace),
         "-",
     ]
+
+
+def test_build_argv_with_no_disabled_mcp_servers_matches_the_exact_shape() -> None:
+    """Requirement A: the empty default yields the pre-isolation argv byte-for-byte."""
+
+    workspace = Path("C:/ws")
+    assert build_argv("C:/bin/codex.exe", workspace) == build_argv(
+        "C:/bin/codex.exe", workspace, ()
+    )
+
+
+def test_build_argv_emits_one_c_override_per_disabled_mcp_server_before_exec() -> None:
+    """Requirement B: one name -> one ``-c mcp_servers.<name>.enabled=false`` pair."""
+
+    workspace = Path("C:/ws")
+    argv = build_argv("C:/bin/codex.exe", workspace, ("openaiDeveloperDocs",))
+
+    assert argv == [
+        "C:/bin/codex.exe",
+        "-c",
+        "mcp_servers.openaiDeveloperDocs.enabled=false",
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--color",
+        "never",
+        "--cd",
+        str(workspace),
+        "-",
+    ]
+
+
+def test_build_argv_preserves_deterministic_order_for_multiple_servers() -> None:
+    """Requirement C: multiple names produce repeated ``-c`` pairs in input order."""
+
+    workspace = Path("C:/ws")
+    argv = build_argv("C:/bin/codex.exe", workspace, ("alpha", "beta_1", "gamma-2"))
+
+    override_pairs = [
+        argv[i : i + 2] for i in range(len(argv)) if argv[i] == "-c"
+    ]
+    assert override_pairs == [
+        ["-c", "mcp_servers.alpha.enabled=false"],
+        ["-c", "mcp_servers.beta_1.enabled=false"],
+        ["-c", "mcp_servers.gamma-2.enabled=false"],
+    ]
+    # The prompt sentinel ``-`` must still be the final argument.
+    assert argv[-1] == "-"
+    assert argv.count("-c") == 3
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "a.b",           # dot would alter the dotted config path
+        "a=b",           # equals would smuggle a key=value fragment
+        "a b",           # whitespace
+        "a;b",           # shell metacharacter
+        "a/b",           # path separator
+        "a\\b",          # path separator
+        "a\"b",          # quote
+        "--flag",        # CLI fragment
+        "",              # empty
+    ],
+)
+def test_validate_mcp_server_name_rejects_injection_forms(bad_name: str) -> None:
+    """Requirement E: only ``[A-Za-z0-9_-]`` is accepted; injection shapes are refused."""
+
+    with pytest.raises(RuntimeError):
+        validate_mcp_server_name(bad_name)
+
+
+def test_validate_mcp_server_name_accepts_the_observed_safe_form() -> None:
+    assert validate_mcp_server_name("openaiDeveloperDocs") == "openaiDeveloperDocs"
+    assert validate_mcp_server_name("node_repl") == "node_repl"
+    assert validate_mcp_server_name("cua_repl") == "cua_repl"
+
+
+def test_provider_rejects_an_invalid_disabled_mcp_name_before_spawn(tmp_path: Path) -> None:
+    """Requirement E: a bad configured name fails fast at construction, no Popen."""
+
+    binary = _executable(tmp_path)
+    with pytest.raises(RuntimeError):
+        CodexCLIProvider(
+            executable=str(binary),
+            workspace_resolver=_resolver(tmp_path),
+            disabled_mcp_servers=("a.b",),
+        )
 
 
 def test_provider_module_has_no_shell_bypass_or_credential_surface() -> None:

@@ -113,6 +113,7 @@ def _worker_settings(
     enabled: bool,
     executable: Path | None,
     workspace: Path | None = None,
+    disabled_mcp_servers: list[str] | None = None,
 ) -> WorkerSettings:
     monkeypatch.setenv("DX_WORKER_DATABASE_URL", "postgresql+psycopg://worker@127.0.0.1/db")
     monkeypatch.setenv("DX_EXECUTION_DATABASE_URL", "postgresql+psycopg://api@127.0.0.1/db")
@@ -128,6 +129,12 @@ def _worker_settings(
         monkeypatch.delenv("DX_CODEX_EXECUTABLE", raising=False)
     else:
         monkeypatch.setenv("DX_CODEX_EXECUTABLE", str(executable))
+    if disabled_mcp_servers is None:
+        monkeypatch.delenv("DX_CODEX_DISABLED_MCP_SERVERS", raising=False)
+    else:
+        monkeypatch.setenv(
+            "DX_CODEX_DISABLED_MCP_SERVERS", json.dumps(disabled_mcp_servers)
+        )
     return WorkerSettings()
 
 
@@ -460,6 +467,49 @@ def test_switch_on_wires_the_real_provider_and_an_injected_guard(
     assert isinstance(captured["guard"], AgentExecutionGuard)
     # Construction never spawns anything.
     assert captured["provider"].pending_handles == ()
+
+
+def test_switch_on_passes_configured_disabled_mcp_names_into_the_real_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Requirement F: the worker forwards DX_CODEX_DISABLED_MCP_SERVERS to the provider."""
+
+    workspace = _workspace(tmp_path)
+    binary = _executable(tmp_path)
+    captured = _record_gateway(monkeypatch, _sentinel_session_factory)
+    settings = _worker_settings(
+        monkeypatch,
+        tmp_path,
+        enabled=True,
+        executable=binary,
+        workspace=workspace,
+        disabled_mcp_servers=["openaiDeveloperDocs"],
+    )
+
+    cli.build_execution_handler(settings)
+
+    provider = captured["provider"]
+    assert isinstance(provider, CodexCLIProvider)
+    assert provider._disabled_mcp_servers == ("openaiDeveloperDocs",)
+
+
+def test_switch_on_default_configuration_passes_an_empty_disabled_mcp_collection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Requirement G: with no DX_CODEX_DISABLED_MCP_SERVERS the provider gets ()."""
+
+    workspace = _workspace(tmp_path)
+    binary = _executable(tmp_path)
+    captured = _record_gateway(monkeypatch, _sentinel_session_factory)
+    settings = _worker_settings(
+        monkeypatch, tmp_path, enabled=True, executable=binary, workspace=workspace
+    )
+
+    cli.build_execution_handler(settings)
+
+    provider = captured["provider"]
+    assert isinstance(provider, CodexCLIProvider)
+    assert provider._disabled_mcp_servers == ()
 
 
 @pytest.mark.parametrize(

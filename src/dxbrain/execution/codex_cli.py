@@ -40,6 +40,7 @@ crash recovery or process-tree reaping in this experimental phase.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -143,7 +144,38 @@ def validate_native_executable(configured: str | None) -> str:
     return str(candidate)
 
 
-def build_argv(executable: str, workspace: Path) -> list[str]:
+_MCP_SERVER_NAME_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
+
+
+def validate_mcp_server_name(name: str) -> str:
+    """Return ``name`` if it is a safe Codex MCP server identifier, else raise.
+
+    The value is interpolated verbatim into the dotted config path
+    ``mcp_servers.<name>.enabled``. Only ``[A-Za-z0-9_-]`` is accepted and the name must
+    not begin with ``-``, so a configured name can never inject a ``.``, ``=``,
+    whitespace or a leading ``-`` flag fragment. This is the same minimal fail-fast
+    mechanism ``validate_native_executable`` uses: a bad value raises ``RuntimeError``
+    during provider construction, before any child can spawn.
+    """
+
+    if not isinstance(name, str) or not name or not _MCP_SERVER_NAME_RE.match(name):
+        raise RuntimeError(
+            f"DX_CODEX_DISABLED_MCP_SERVERS contains an invalid MCP server name "
+            f"{name!r}: only [A-Za-z0-9_-] characters are allowed"
+        )
+    if name.startswith("-"):
+        raise RuntimeError(
+            f"DX_CODEX_DISABLED_MCP_SERVERS contains an invalid MCP server name "
+            f"{name!r}: a name must not begin with '-'"
+        )
+    return name
+
+
+def build_argv(
+    executable: str,
+    workspace: Path,
+    disabled_mcp_servers: tuple[str, ...] = (),
+) -> list[str]:
     """The exact E.3B argv. No flag is added merely because Codex supports it.
 
     ``-`` makes Codex read the prompt from stdin, so the prompt never appears in argv
@@ -155,21 +187,30 @@ def build_argv(executable: str, workspace: Path) -> list[str]:
     rejects the whole invocation with ``error: unexpected argument '--ask-for-approval'
     found`` (observed on codex-cli 0.146.0 during the first real provider smoke, which
     is why this ordering is asserted verbatim by the provider tests).
+
+    ``disabled_mcp_servers`` adds one ``-c mcp_servers.<name>.enabled=false`` override
+    per name, in the given order, also BEFORE ``exec`` (``-c`` is a global option too).
+    The default empty tuple yields the exact pre-isolation argv.
     """
 
-    return [
-        executable,
-        "--ask-for-approval",
-        "never",
-        "exec",
-        "--sandbox",
-        "read-only",
-        "--color",
-        "never",
-        "--cd",
-        str(workspace),
-        "-",
-    ]
+    argv = [executable]
+    for name in disabled_mcp_servers:
+        argv.extend(["-c", f"mcp_servers.{name}.enabled=false"])
+    argv.extend(
+        [
+            "--ask-for-approval",
+            "never",
+            "exec",
+            "--sandbox",
+            "read-only",
+            "--color",
+            "never",
+            "--cd",
+            str(workspace),
+            "-",
+        ]
+    )
+    return argv
 
 
 def _decode(payload: bytes | None) -> str:
@@ -201,6 +242,7 @@ class CodexCLIProvider:
         workspace_resolver: WorkspaceResolver,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         terminate_grace_seconds: float = DEFAULT_TERMINATE_GRACE_SECONDS,
+        disabled_mcp_servers: tuple[str, ...] = (),
     ) -> None:
         # Validated here, not at dispatch time: an unusable executable is a startup
         # misconfiguration, so worker construction fails instead of every execution
@@ -209,6 +251,11 @@ class CodexCLIProvider:
         self._workspace_resolver = workspace_resolver
         self._timeout_seconds = timeout_seconds
         self._terminate_grace_seconds = terminate_grace_seconds
+        # Validated names only, in deterministic input order. The provider acts only on
+        # names DX is explicitly told to disable; it never auto-discovers MCP servers.
+        self._disabled_mcp_servers = tuple(
+            validate_mcp_server_name(name) for name in disabled_mcp_servers
+        )
         # PROCESS_LOCAL_EPHEMERAL. Keyed by external_execution_id. Never persisted.
         self._handles: dict[str, subprocess.Popen[bytes]] = {}
 
@@ -276,7 +323,7 @@ class CodexCLIProvider:
         # that only modelled provider outcomes are expressed as receipts.
         prompt = self._prompt_bytes(request)
 
-        argv = build_argv(self._executable, workspace)
+        argv = build_argv(self._executable, workspace, self._disabled_mcp_servers)
 
         try:
             process = subprocess.Popen(

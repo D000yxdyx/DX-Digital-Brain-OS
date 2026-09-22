@@ -51,6 +51,7 @@ def build_execution_handler(settings: WorkerSettings) -> Callable[[UUID], None] 
         provider = CodexCLIProvider(
             executable=settings.codex_executable,
             workspace_resolver=workspace_resolver,
+            disabled_mcp_servers=tuple(settings.codex_disabled_mcp_servers),
         )
     else:
         provider = FakeExecutionProvider()

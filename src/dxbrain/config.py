@@ -106,3 +106,11 @@ class WorkerSettings(BaseSettings):
     codex_executable: str | None = Field(
         default=None, validation_alias="DX_CODEX_EXECUTABLE"
     )
+    # Phase E.3B process-local MCP isolation. A JSON array of Codex MCP server NAMES that
+    # the provider disables for ITS child process only, via one ``-c`` override per name.
+    # Absent -> empty -> the argv is byte-for-byte the pre-isolation shape. This is a list
+    # of server names, never arbitrary ``-c`` fragments: the provider validates each name
+    # against a narrow identifier form before spawn.
+    codex_disabled_mcp_servers: list[str] = Field(
+        default_factory=list, validation_alias="DX_CODEX_DISABLED_MCP_SERVERS"
+    )
