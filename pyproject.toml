@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 dxbrain-worker = "dxbrain.worker.cli:main"
+dxbrain-operator = "dxbrain.operator.cli:main"
 
 [project.optional-dependencies]
 dev = [
