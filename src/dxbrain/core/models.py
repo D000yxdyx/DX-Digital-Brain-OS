@@ -543,6 +543,40 @@ class AgentLifecycleCommand(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ExecutionReview(Base):
+    """The human verdict on a technically terminal AgentExecution.
+
+    Independent of ``AgentExecution.status`` by design (E.4 MVP): a ``succeeded``
+    execution may still be ``rejected`` by the human, and recording the verdict never
+    mutates the execution's technical state. One final review per execution (MVP);
+    immutable after creation; ``actor_type`` must be ``human``; only allowed while the
+    execution is ``succeeded``.
+    """
+
+    __tablename__ = "execution_reviews"
+    __table_args__ = (
+        UniqueConstraint("agent_execution_id", name="uq_execution_review_execution"),
+        CheckConstraint(
+            "decision IN ('accepted', 'rejected')", name="ck_execution_review_decision"
+        ),
+        {"schema": "dx_governance"},
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    agent_execution_id: Mapped[UUID] = mapped_column(
+        ForeignKey("dx_workflow.agent_executions.id"), nullable=False
+    )
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class ProjectDossier(Base):
     __tablename__ = "project_dossiers"
     __table_args__ = (
