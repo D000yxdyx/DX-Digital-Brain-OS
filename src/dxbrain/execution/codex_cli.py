@@ -149,15 +149,21 @@ def build_argv(executable: str, workspace: Path) -> list[str]:
     ``-`` makes Codex read the prompt from stdin, so the prompt never appears in argv
     (where every other process on the machine could read it) and no Windows argv length
     limit applies.
+
+    ``--ask-for-approval`` is a GLOBAL option of the Codex CLI, not one of ``exec``.
+    It must therefore precede the ``exec`` subcommand: placed after ``exec`` the CLI
+    rejects the whole invocation with ``error: unexpected argument '--ask-for-approval'
+    found`` (observed on codex-cli 0.146.0 during the first real provider smoke, which
+    is why this ordering is asserted verbatim by the provider tests).
     """
 
     return [
         executable,
+        "--ask-for-approval",
+        "never",
         "exec",
         "--sandbox",
         "read-only",
-        "--ask-for-approval",
-        "never",
         "--color",
         "never",
         "--cd",

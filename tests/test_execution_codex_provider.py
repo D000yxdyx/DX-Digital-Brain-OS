@@ -227,11 +227,11 @@ def test_argv_is_exact_and_the_prompt_never_enters_it(
     assert receipt.accepted is True
     assert observed["argv"] == [
         str(binary),
+        "--ask-for-approval",
+        "never",
         "exec",
         "--sandbox",
         "read-only",
-        "--ask-for-approval",
-        "never",
         "--color",
         "never",
         "--cd",
@@ -247,11 +247,11 @@ def test_build_argv_is_a_pure_function() -> None:
 
     assert build_argv("C:/bin/codex.exe", workspace) == [
         "C:/bin/codex.exe",
+        "--ask-for-approval",
+        "never",
         "exec",
         "--sandbox",
         "read-only",
-        "--ask-for-approval",
-        "never",
         "--color",
         "never",
         "--cd",
