@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -80,7 +80,7 @@ class WorkerSettings(BaseSettings):
     is not wired at all and the worker keeps its original behaviour. The worker process
     therefore never needs ``DX_ROOT_API_KEY``, and no GRANT is added to ``dx_worker``.
 
-    Phase E.3B adds the three settings the worker runtime needs to build the pre-dispatch
+    Phase E.3B adds the settings the worker runtime needs to build the pre-dispatch
     guard and the real Codex provider. They carry the SAME environment aliases as their
     ``Settings`` counterparts -- there is deliberately no second interpretation of
     ``DX_AGENT_EXECUTION_ENABLED`` or ``DX_AGENT_WORKSPACES``, and no new namespace. They
@@ -113,4 +113,9 @@ class WorkerSettings(BaseSettings):
     # against a narrow identifier form before spawn.
     codex_disabled_mcp_servers: list[str] = Field(
         default_factory=list, validation_alias="DX_CODEX_DISABLED_MCP_SERVERS"
+    )
+    # Optional, dedicated Codex credential. Ambient OPENAI_API_KEY is not forwarded;
+    # this value is passed to the Codex child only when explicitly configured.
+    codex_api_key: SecretStr | None = Field(
+        default=None, validation_alias="DX_CODEX_API_KEY"
     )

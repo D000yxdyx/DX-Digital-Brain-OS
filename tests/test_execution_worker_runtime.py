@@ -114,6 +114,7 @@ def _worker_settings(
     executable: Path | None,
     workspace: Path | None = None,
     disabled_mcp_servers: list[str] | None = None,
+    codex_api_key: str | None = None,
 ) -> WorkerSettings:
     monkeypatch.setenv("DX_WORKER_DATABASE_URL", "postgresql+psycopg://worker@127.0.0.1/db")
     monkeypatch.setenv("DX_EXECUTION_DATABASE_URL", "postgresql+psycopg://api@127.0.0.1/db")
@@ -135,6 +136,10 @@ def _worker_settings(
         monkeypatch.setenv(
             "DX_CODEX_DISABLED_MCP_SERVERS", json.dumps(disabled_mcp_servers)
         )
+    if codex_api_key is None:
+        monkeypatch.delenv("DX_CODEX_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("DX_CODEX_API_KEY", codex_api_key)
     return WorkerSettings()
 
 
@@ -467,6 +472,30 @@ def test_switch_on_wires_the_real_provider_and_an_injected_guard(
     assert isinstance(captured["guard"], AgentExecutionGuard)
     # Construction never spawns anything.
     assert captured["provider"].pending_handles == ()
+    assert captured["provider"]._api_key is None
+
+
+def test_switch_on_passes_only_the_explicit_codex_api_key_to_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace = _workspace(tmp_path)
+    binary = _executable(tmp_path)
+    captured = _record_gateway(monkeypatch, _sentinel_session_factory)
+    settings = _worker_settings(
+        monkeypatch,
+        tmp_path,
+        enabled=True,
+        executable=binary,
+        workspace=workspace,
+        codex_api_key="dedicated-codex-test-key",
+    )
+
+    cli.build_execution_handler(settings)
+
+    provider = captured["provider"]
+    assert isinstance(provider, CodexCLIProvider)
+    assert provider._api_key == "dedicated-codex-test-key"
+    assert "dedicated-codex-test-key" not in repr(settings)
 
 
 def test_switch_on_passes_configured_disabled_mcp_names_into_the_real_provider(

@@ -37,6 +37,7 @@ from uuid import UUID, uuid4
 
 from dxbrain.config import Settings, WorkerSettings
 from dxbrain.core.agent_executions import AgentExecutionService
+from dxbrain.core.agents import AgentService
 from dxbrain.core.database import create_session_factory
 from dxbrain.core.execution_reviews import ExecutionReviewService
 from dxbrain.core.governance import GovernanceService
@@ -44,6 +45,13 @@ from dxbrain.core.model_calls import ModelCallService
 from dxbrain.core.plan_drafts import PlanDraftService
 from dxbrain.core.tasks import TaskService
 from dxbrain.core.workflow import WorkflowService
+from dxbrain.execution.contracts import ExecutionProviderError
+from dxbrain.operator.bootstrap import (
+    EXECUTOR_CAPABILITIES,
+    EXECUTOR_ROLE,
+    BootstrapConflict,
+    bootstrap_executor,
+)
 from dxbrain.operator.outbox_loop import (
     OutboxLoopError,
     drain_until_terminal,
@@ -92,6 +100,7 @@ def _human_actor(actor_id: str) -> tuple[str, str]:
 
 # --- fail-closed scope parsing -----------------------------------------------------
 
+
 def parse_intent(scope: dict[str, Any]) -> StoredIntent:
     """Load the E.4 intent from proposal.scope, failing closed on any deviation."""
 
@@ -99,15 +108,11 @@ def parse_intent(scope: dict[str, Any]) -> StoredIntent:
         raise OperatorError("proposal.scope is not an object; stored intent is malformed")
     missing = [key for key in SCOPE_KEYS if key not in scope]
     if missing:
-        raise OperatorError(
-            f"proposal.scope is missing required E.4 fields: {', '.join(missing)}"
-        )
+        raise OperatorError(f"proposal.scope is missing required E.4 fields: {', '.join(missing)}")
 
     workspace_ref = scope["workspace_ref"]
     if not isinstance(workspace_ref, str) or not _WORKSPACE_REF_RE.match(workspace_ref):
-        raise OperatorError(
-            "proposal.scope workspace_ref must match '^[a-z0-9][a-z0-9_-]*$'"
-        )
+        raise OperatorError("proposal.scope workspace_ref must match '^[a-z0-9][a-z0-9_-]*$'")
 
     provider = scope["provider"]
     if not isinstance(provider, str) or not provider:
@@ -151,10 +156,34 @@ def require_single_step(steps: list[Any]) -> Any:
 
     if len(steps) != 1:
         raise OperatorError(
-            "E.4 MVP supports exactly one workflow step; "
-            f"accepted run has {len(steps)} steps"
+            f"E.4 MVP supports exactly one workflow step; accepted run has {len(steps)} steps"
         )
     return steps[0]
+
+
+def build_execution_prompt(human_instruction: str, confirmed_step_title: str) -> str:
+    """Build the authoritative ``request_input["prompt"]`` for a real execution.
+
+    The CodexCLIProvider reads exactly one key — ``request_input["prompt"]`` — and
+    treats a missing/blank value as a contract violation. The prompt is therefore
+    composed deterministically here, from the two facts that make an execution
+    meaningful: the human's original instruction (``proposal.rationale``) and the
+    confirmed single workflow step title. It never falls back to ``parameters`` and
+    never lets free planner text replace the human instruction.
+
+    Fail closed: a blank instruction or step raises before any AgentExecution is
+    created or dispatched.
+    """
+
+    instruction = (human_instruction or "").strip()
+    step = (confirmed_step_title or "").strip()
+    if not instruction:
+        raise OperatorError("human instruction is empty; cannot build an execution prompt")
+    if not step:
+        raise OperatorError(
+            "confirmed workflow step has no title; cannot build an execution prompt"
+        )
+    return f"{instruction}\n\nConfirmed step: {step}\nAct only within the DX-authorized workspace."
 
 
 def _resolve_uuid(value: str, label: str) -> UUID:
@@ -188,9 +217,7 @@ def read_execution_detail(session_factory, execution_id: UUID) -> ExecutionDetai
     from dxbrain.core.models import AgentExecution
 
     with session_factory() as session:
-        row = session.scalar(
-            select(AgentExecution).where(AgentExecution.id == execution_id)
-        )
+        row = session.scalar(select(AgentExecution).where(AgentExecution.id == execution_id))
         if row is None:
             raise OperatorError(f"agent execution {execution_id} not found")
         return ExecutionDetail(
@@ -206,6 +233,7 @@ def read_execution_detail(session_factory, execution_id: UUID) -> ExecutionDetai
 
 
 # --- service wiring ----------------------------------------------------------------
+
 
 class OperatorContext:
     """All existing production services composed onto the operator's own principal."""
@@ -226,6 +254,7 @@ class OperatorContext:
         self.workflow = WorkflowService(self.session_factory)
         self.agent_executions = AgentExecutionService(self.session_factory)
         self.execution_reviews = ExecutionReviewService(self.session_factory)
+        self.agents = AgentService(self.session_factory)
         if settings is not None:
             registry = ModelProviderRegistry(
                 deepseek_api_key=settings.deepseek_api_key,
@@ -255,6 +284,7 @@ class OperatorContext:
 
 
 # --- commands ----------------------------------------------------------------------
+
 
 def cmd_create(ctx: OperatorContext, args: argparse.Namespace) -> int:
     intent = StoredIntent(
@@ -288,12 +318,17 @@ def cmd_create(ctx: OperatorContext, args: argparse.Namespace) -> int:
         actor_id=actor_id,
         idempotency_key=_idempotency_key(),
     )
-    print(json.dumps({
-        "task_id": str(task.id),
-        "proposal_id": str(proposal.id),
-        "stored_intent": build_scope(intent),
-        "requested_capabilities": requested_capabilities,
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "task_id": str(task.id),
+                "proposal_id": str(proposal.id),
+                "stored_intent": build_scope(intent),
+                "requested_capabilities": requested_capabilities,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -321,11 +356,16 @@ def cmd_approve(ctx: OperatorContext, args: argparse.Namespace) -> int:
         actor_id=actor_id,
         idempotency_key=_idempotency_key(),
     )
-    print(json.dumps({
-        "approval_id": str(grant.id),
-        "expires_at": grant.expires_at.isoformat(),
-        "approved_capabilities": proposal.requested_capabilities,
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "approval_id": str(grant.id),
+                "expires_at": grant.expires_at.isoformat(),
+                "approved_capabilities": proposal.requested_capabilities,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -358,19 +398,31 @@ def cmd_plan(ctx: OperatorContext, args: argparse.Namespace) -> int:
         actor_id=actor_id,
         idempotency_key=_idempotency_key(),
     )
-    print(json.dumps({
-        "model_call_id": str(finalized.id),
-        "draft_id": str(draft.id),
-        "draft_status": draft.status,
-        "steps": draft.steps,
-        "warnings": draft.warnings,
-    }, indent=2))
+    # R2: fail closed at the plan boundary — a live plan that yields anything other
+    # than exactly one step is rejected before it can ever reach a confirmed state.
+    require_single_step(draft.steps)
+    print(
+        json.dumps(
+            {
+                "model_call_id": str(finalized.id),
+                "draft_id": str(draft.id),
+                "draft_status": draft.status,
+                "steps": draft.steps,
+                "warnings": draft.warnings,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
 def cmd_confirm(ctx: OperatorContext, args: argparse.Namespace) -> int:
     draft_id = _resolve_uuid(args.draft_id, "draft_id")
     actor_type, actor_id = _human_actor(args.actor_id)
+    # R2: re-validate the single-step boundary immediately before confirmation, so a
+    # multi-step draft can never be promoted to a confirmed executable state.
+    current = ctx.plan_drafts.get_draft(draft_id)
+    require_single_step(current.steps)
     draft = ctx.plan_drafts.review_draft(
         draft_id=draft_id,
         status="confirmed",
@@ -379,11 +431,16 @@ def cmd_confirm(ctx: OperatorContext, args: argparse.Namespace) -> int:
         actor_id=actor_id,
         idempotency_key=_idempotency_key(),
     )
-    print(json.dumps({
-        "draft_id": str(draft.id),
-        "revision": draft.revision,
-        "status": draft.status,
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "draft_id": str(draft.id),
+                "revision": draft.revision,
+                "status": draft.status,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -394,10 +451,7 @@ def cmd_execute(ctx: OperatorContext, args: argparse.Namespace) -> int:
 
     # 2. Require an active valid ApprovalGrant.
     grants = ctx.governance.list_approvals(pid)
-    active = [
-        g for g in grants
-        if g.status == "active" and g.expires_at > datetime.now(UTC)
-    ]
+    active = [g for g in grants if g.status == "active" and g.expires_at > datetime.now(UTC)]
     if not active:
         raise OperatorError("proposal has no active approval grant")
 
@@ -425,6 +479,10 @@ def cmd_execute(ctx: OperatorContext, args: argparse.Namespace) -> int:
     # 7. E.4 MVP requires exactly one executable workflow step.
     step = require_single_step(run.steps)
 
+    # R1: the authoritative execution prompt is built from the human instruction
+    # (proposal.rationale) and the confirmed single step title, fail-closed.
+    prompt = build_execution_prompt(proposal.rationale, step.title)
+
     # 8. Create the AgentExecution through the existing service.
     execution = ctx.agent_executions.create(
         task_id=proposal.task_id,
@@ -440,6 +498,7 @@ def cmd_execute(ctx: OperatorContext, args: argparse.Namespace) -> int:
         capability=intent.capability,
         workspace_ref=intent.workspace_ref,
         request_input={
+            "prompt": prompt,
             "title": step.title,
             "capability": step.capability,
             "parameters": step.parameters,
@@ -454,12 +513,17 @@ def cmd_execute(ctx: OperatorContext, args: argparse.Namespace) -> int:
     # ``WorkerSettings`` (DX_WORKER_DATABASE_URL for the lease principal, optional
     # DX_EXECUTION_DATABASE_URL for the gateway principal) — never from the operator's
     # own dx_api URL, so the dx_api / dx_worker split is preserved.
-    worker_settings = WorkerSettings()
-    worker = OutboxWorker(
-        create_session_factory(worker_settings.database_url),
-        handler=build_execution_handler(worker_settings),
-    )
+    #
+    # R6: the entire real-execution boundary (worker wiring + drain) is fenced here so
+    # that known operational/provider failures become a bounded operator failure
+    # instead of an uncontrolled traceback. The underlying execution state is never
+    # fabricated — it is re-read from the persisted AgentExecution after the failure.
     try:
+        worker_settings = WorkerSettings()
+        worker = OutboxWorker(
+            create_session_factory(worker_settings.database_url),
+            handler=build_execution_handler(worker_settings),
+        )
         result = drain_until_terminal(
             worker=worker,
             session_factory=ctx.session_factory,
@@ -467,18 +531,32 @@ def cmd_execute(ctx: OperatorContext, args: argparse.Namespace) -> int:
         )
     except OutboxLoopError as error:
         raise OperatorError(str(error)) from error
+    except ExecutionProviderError as error:
+        # A provider operational/contract failure surfaced through the worker handler
+        # (gateway -> CodexCLIProvider). Report the persisted execution state, not a
+        # fabricated success, and keep the root class for traceability.
+        status = read_status(ctx.session_factory, execution.id)
+        raise OperatorError(
+            f"real execution provider failed (class={type(error).__name__}, "
+            f"execution_id={execution.id}, status={status!r}): {error}"
+        ) from error
 
     final = read_status(ctx.session_factory, execution.id)
     detail = read_execution_detail(ctx.session_factory, execution.id)
-    print(json.dumps({
-        "execution_id": str(execution.id),
-        "status": final,
-        "exit_code": detail.exit_code,
-        "error_code": detail.error_code,
-        "summary": detail.summary,
-        "result_tail": detail.result_tail,
-        "consumed_events": result.consumed_events,
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "execution_id": str(execution.id),
+                "status": final,
+                "exit_code": detail.exit_code,
+                "error_code": detail.error_code,
+                "summary": detail.summary,
+                "result_tail": detail.result_tail,
+                "consumed_events": result.consumed_events,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -489,12 +567,14 @@ def cmd_status(ctx: OperatorContext, args: argparse.Namespace) -> int:
         _, proposal = ctx._load_intent(args.proposal_id)
         drafts = ctx.plan_drafts.list_drafts(proposal.id)
         draft_state = drafts[-1].status if drafts else None
-        out.update({
-            "task_id": str(proposal.task_id),
-            "proposal_id": str(proposal.id),
-            "proposal_status": proposal.status,
-            "draft_status": draft_state,
-        })
+        out.update(
+            {
+                "task_id": str(proposal.task_id),
+                "proposal_id": str(proposal.id),
+                "proposal_status": proposal.status,
+                "draft_status": draft_state,
+            }
+        )
     elif args.execution_id:
         eid = _resolve_uuid(args.execution_id, "execution_id")
         detail = read_execution_detail(ctx.session_factory, eid)
@@ -509,9 +589,14 @@ def cmd_status(ctx: OperatorContext, args: argparse.Namespace) -> int:
         }
         review = ctx.execution_reviews.get(eid)
         out["execution"]["human_review"] = (
-            {"decision": review.decision, "reason": review.reason,
-             "actor_id": review.actor_id, "created_at": str(review.created_at)}
-            if review else None
+            {
+                "decision": review.decision,
+                "reason": review.reason,
+                "actor_id": review.actor_id,
+                "created_at": str(review.created_at),
+            }
+            if review
+            else None
         )
     else:
         raise OperatorError("status requires --proposal-id or --execution-id")
@@ -533,15 +618,20 @@ def _record_verdict(ctx: OperatorContext, args: argparse.Namespace, decision: st
     )
     # The technical result is untouched; report both facts.
     view = ctx.agent_executions.get(eid)
-    print(json.dumps({
-        "execution_id": str(eid),
-        "agent_execution_status": view.status if view else None,
-        "human_review": {
-            "decision": review.decision,
-            "reason": review.reason,
-            "actor_id": review.actor_id,
-        },
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "execution_id": str(eid),
+                "agent_execution_status": view.status if view else None,
+                "human_review": {
+                    "decision": review.decision,
+                    "reason": review.reason,
+                    "actor_id": review.actor_id,
+                },
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -553,7 +643,42 @@ def cmd_reject(ctx: OperatorContext, args: argparse.Namespace) -> int:
     return _record_verdict(ctx, args, "rejected")
 
 
+def cmd_bootstrap_executor(ctx: OperatorContext, args: argparse.Namespace) -> int:
+    actor_id = args.actor_id
+    try:
+        result = bootstrap_executor(
+            tasks=ctx.tasks,
+            agents=ctx.agents,
+            actor_id=actor_id,
+            name=args.name,
+            version=args.version,
+        )
+    except BootstrapConflict as error:
+        raise OperatorError(str(error)) from error
+    permission = ctx.agents.check_permission(
+        agent_id=result.agent_id, capability=EXECUTION_CAPABILITY
+    )
+    print(
+        json.dumps(
+            {
+                "agent_id": str(result.agent_id),
+                "task_id": str(result.task_id),
+                "name": args.name,
+                "version": args.version,
+                "role": EXECUTOR_ROLE,
+                "status": ctx.agents.get_agent(result.agent_id).status,
+                "allowed_capabilities": EXECUTOR_CAPABILITIES,
+                "agent.execution_allowed": permission.allowed,
+                "reused": result.reused,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 # --- argument parsing --------------------------------------------------------------
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dxbrain-operator", description=__doc__)
@@ -610,6 +735,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reason", required=True)
     p.set_defaults(func=cmd_reject)
 
+    p = sub.add_parser(
+        "bootstrap-executor",
+        help="register + activate the first dx-codex-executor agent (fail-closed)",
+    )
+    p.add_argument("--actor-id", required=True)
+    p.add_argument("--name", default="dx-codex-executor")
+    p.add_argument("--version", default="1")
+    p.set_defaults(func=cmd_bootstrap_executor)
+
     return parser
 
 
@@ -621,6 +755,15 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(ctx, args)
     except OperatorError as error:
         print(f"error: {error}", file=sys.stderr)
+        return 2
+    except ExecutionProviderError as error:
+        # Belt-and-braces: any real-execution provider/contract failure that escapes a
+        # command handler is still a bounded operator failure, never a traceback. It
+        # carries no secrets and preserves the root exception class.
+        print(
+            f"error: real execution provider failure (class={type(error).__name__}): {error}",
+            file=sys.stderr,
+        )
         return 2
 
 

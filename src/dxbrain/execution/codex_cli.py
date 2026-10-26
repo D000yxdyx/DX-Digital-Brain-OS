@@ -29,9 +29,11 @@ created a provider child process", and nothing else:
 ORM model and no ``dxbrain.core`` module: a provider receives plain dataclasses. It reaches
 DX authority only through the injected ``WorkspaceResolver``.
 
-**No credentials.** The child inherits the normal OS-user environment and reads its own
-Codex credential store. DX never reads ``auth.json``, never injects a token or API key,
-never logs a credential value and never touches ``CODEX_HOME``.
+**Narrow child environment.** The child receives only required OS/runtime variables and
+the Codex profile location so it can read credentials stored by Codex's own sign-in flow.
+An API key is supplied only from the dedicated ``DX_CODEX_API_KEY`` setting. DX never
+reads Codex credential files or logs credential values; worker/database/provider secrets
+are not copied into the child environment.
 
 Process handle storage is ``PROCESS_LOCAL_EPHEMERAL`` (see ``ProcessHandles``): handles are
 never persisted, so a worker crash leaves an orphan child and there is deliberately **no**
@@ -40,6 +42,7 @@ crash recovery or process-tree reaping in this experimental phase.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from collections.abc import Mapping
@@ -88,6 +91,66 @@ RESULT_TAIL_LIMIT = 4000
 # task-controlled: nothing in DispatchRequest may widen how long a real child may run.
 DEFAULT_TIMEOUT_SECONDS = 180.0
 DEFAULT_TERMINATE_GRACE_SECONDS = 5.0
+
+# Only operating-system, locale, certificate, and Codex profile variables cross the
+# worker/provider boundary. In particular, ambient DX database/API/provider credentials,
+# proxy credentials, and arbitrary tool configuration are not inherited.
+_CODEX_ENVIRONMENT_KEYS = frozenset(
+    {
+        "APPDATA",
+        "CODEX_HOME",
+        "COMSPEC",
+        "CURL_CA_BUNDLE",
+        "HOME",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LOCALAPPDATA",
+        "PATH",
+        "PATHEXT",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SYSTEMDRIVE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "WINDIR",
+        "XDG_CONFIG_HOME",
+    }
+)
+_CODEX_ENVIRONMENT_KEY_NAMES = {
+    name.casefold(): name for name in _CODEX_ENVIRONMENT_KEYS
+}
+
+
+def build_codex_child_environment(
+    source: Mapping[str, str], *, api_key: str | None = None
+) -> dict[str, str]:
+    """Build a narrow environment for the Codex CLI child.
+
+    The OS-user profile and ``CODEX_HOME`` remain available so Codex can use credentials
+    stored by its own sign-in flow. A dedicated API key is forwarded only when supplied
+    through ``DX_CODEX_API_KEY``; ambient ``OPENAI_API_KEY`` and all other application
+    credentials are deliberately ignored. Proxy environment variables are also omitted
+    because they may contain credentials or internal routing details.
+    """
+
+    child_environment: dict[str, str] = {}
+    for name, value in source.items():
+        canonical_name = _CODEX_ENVIRONMENT_KEY_NAMES.get(name.casefold())
+        if canonical_name is not None:
+            child_environment[canonical_name] = value
+
+    if api_key:
+        child_environment["OPENAI_API_KEY"] = api_key
+
+    return child_environment
+
 
 # The approved native executable type for the Windows E.3B smoke. npm shims (``codex.cmd``,
 # ``codex.ps1``, the extension-less POSIX launcher) are rejected by design: Windows
@@ -243,6 +306,7 @@ class CodexCLIProvider:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         terminate_grace_seconds: float = DEFAULT_TERMINATE_GRACE_SECONDS,
         disabled_mcp_servers: tuple[str, ...] = (),
+        api_key: str | None = None,
     ) -> None:
         # Validated here, not at dispatch time: an unusable executable is a startup
         # misconfiguration, so worker construction fails instead of every execution
@@ -251,6 +315,7 @@ class CodexCLIProvider:
         self._workspace_resolver = workspace_resolver
         self._timeout_seconds = timeout_seconds
         self._terminate_grace_seconds = terminate_grace_seconds
+        self._api_key = api_key
         # Validated names only, in deterministic input order. The provider acts only on
         # names DX is explicitly told to disable; it never auto-discovers MCP servers.
         self._disabled_mcp_servers = tuple(
@@ -332,6 +397,7 @@ class CodexCLIProvider:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=build_codex_child_environment(os.environ, api_key=self._api_key),
             )
         except OSError as error:
             # No child process exists: exactly the frozen pre-handoff failure, so the

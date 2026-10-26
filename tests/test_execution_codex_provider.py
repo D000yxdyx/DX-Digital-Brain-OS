@@ -44,6 +44,7 @@ from dxbrain.execution.codex_cli import (
     WORKSPACE_DENIED,
     CodexCLIProvider,
     build_argv,
+    build_codex_child_environment,
     validate_mcp_server_name,
     validate_native_executable,
 )
@@ -142,6 +143,7 @@ def _patch_popen(
         observed["spawns"] += 1
         observed["argv"] = list(argv)
         observed["cwd"] = kwargs.get("cwd")
+        observed["env"] = kwargs.get("env")
         observed["probe"] = probe() if probe is not None else None
         if must_not_spawn:
             raise AssertionError("the provider must not spawn a child on this path")
@@ -152,6 +154,7 @@ def _patch_popen(
             stdin=kwargs.get("stdin"),
             stdout=kwargs.get("stdout"),
             stderr=kwargs.get("stderr"),
+            env=kwargs.get("env"),
         )
         if preclose_stdin and process.stdin is not None:
             # Deterministic post-spawn failure: the provider's write hits a closed stream.
@@ -172,6 +175,97 @@ def _patch_popen(
 
     monkeypatch.setattr(codex_cli.subprocess, "Popen", _factory)
     return observed
+
+
+def test_codex_child_environment_keeps_runtime_profile_but_drops_worker_secrets() -> None:
+    source = {
+        "Path": "system-path",
+        "SYSTEMROOT": "system-root",
+        "USERPROFILE": "user-profile",
+        "APPDATA": "user-appdata",
+        "CODEX_HOME": "codex-profile",
+        "DX_DATABASE_URL": "db-sentinel",
+        "DX_WORKER_DATABASE_URL": "worker-db-sentinel",
+        "DX_EXECUTION_DATABASE_URL": "execution-db-sentinel",
+        "DX_TEST_DATABASE_URL": "test-db-sentinel",
+        "DX_TEST_WORKER_DATABASE_URL": "test-worker-db-sentinel",
+        "DX_TEST_MIGRATION_DATABASE_URL": "test-migration-db-sentinel",
+        "POSTGRES_PASSWORD": "postgres-password-sentinel",
+        "DX_DATABASE_PASSWORD": "database-password-sentinel",
+        "DX_ROOT_API_KEY": "root-api-sentinel",
+        "OPENAI_API_KEY": "ambient-openai-sentinel",
+        "ANTHROPIC_API_KEY": "anthropic-sentinel",
+        "DEEPSEEK_API_KEY": "deepseek-sentinel",
+        "DX_CODEX_API_KEY": "unmapped-codex-sentinel",
+        "HTTPS_PROXY": "proxy-sentinel",
+        "CUSTOM_SECRET": "custom-sentinel",
+    }
+
+    child_environment = build_codex_child_environment(source)
+
+    assert child_environment == {
+        "PATH": "system-path",
+        "SYSTEMROOT": "system-root",
+        "USERPROFILE": "user-profile",
+        "APPDATA": "user-appdata",
+        "CODEX_HOME": "codex-profile",
+    }
+    assert not any("sentinel" in value for value in child_environment.values())
+
+
+def test_codex_child_environment_accepts_only_explicit_dedicated_api_key() -> None:
+    child_environment = build_codex_child_environment(
+        {"OPENAI_API_KEY": "ambient-openai-sentinel"},
+        api_key="dedicated-codex-test-key",
+    )
+
+    assert child_environment == {"OPENAI_API_KEY": "dedicated-codex-test-key"}
+
+
+def test_dispatch_passes_the_filtered_environment_to_popen(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace = _workspace(tmp_path)
+    binary = _executable(tmp_path)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setenv("DX_DATABASE_URL", "root-db-sentinel")
+    monkeypatch.setenv("DX_WORKER_DATABASE_URL", "worker-db-sentinel")
+    monkeypatch.setenv("DX_EXECUTION_DATABASE_URL", "execution-db-sentinel")
+    monkeypatch.setenv("DX_TEST_DATABASE_URL", "test-db-sentinel")
+    monkeypatch.setenv("DX_TEST_WORKER_DATABASE_URL", "test-worker-db-sentinel")
+    monkeypatch.setenv("DX_TEST_MIGRATION_DATABASE_URL", "test-migration-db-sentinel")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "postgres-password-sentinel")
+    monkeypatch.setenv("DX_DATABASE_PASSWORD", "database-password-sentinel")
+    monkeypatch.setenv("DX_ROOT_API_KEY", "root-api-sentinel")
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-openai-sentinel")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-sentinel")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-sentinel")
+    observed = _patch_popen(monkeypatch, _CHILD_REPORTS_CWD)
+    provider = CodexCLIProvider(
+        executable=str(binary), workspace_resolver=_resolver(workspace)
+    )
+
+    receipt = provider.dispatch(_request())
+    outcome = provider.collect(receipt)
+
+    assert receipt.accepted is True
+    assert outcome.status == OUTCOME_SUCCEEDED
+    assert observed["env"]["CODEX_HOME"] == str(tmp_path / "codex-home")
+    assert "PATH" in observed["env"]
+    assert not {
+        "DX_DATABASE_URL",
+        "DX_WORKER_DATABASE_URL",
+        "DX_EXECUTION_DATABASE_URL",
+        "DX_TEST_DATABASE_URL",
+        "DX_TEST_WORKER_DATABASE_URL",
+        "DX_TEST_MIGRATION_DATABASE_URL",
+        "POSTGRES_PASSWORD",
+        "DX_DATABASE_PASSWORD",
+        "DX_ROOT_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+    }.intersection(observed["env"])
 
 
 def _provider(root: Path, workspace: Path, **overrides: Any) -> CodexCLIProvider:
@@ -351,8 +445,8 @@ def test_provider_rejects_an_invalid_disabled_mcp_name_before_spawn(tmp_path: Pa
         )
 
 
-def test_provider_module_has_no_shell_bypass_or_credential_surface() -> None:
-    """Static guard-rail: no shell, no dangerous bypass, no credential handling."""
+def test_provider_module_has_no_shell_bypass_or_credential_file_access() -> None:
+    """Static guard-rail: no shell, bypass flag, or Codex credential-file access."""
 
     source = _module_executable_source()
 
@@ -362,10 +456,12 @@ def test_provider_module_has_no_shell_bypass_or_credential_surface() -> None:
         "cmd.exe",
         "powershell",
         "auth.json",
-        "CODEX_HOME",
         "login",
     ):
         assert forbidden not in source
+    assert "build_codex_child_environment" in source
+    assert "DX_WORKER_DATABASE_URL" not in source
+    assert "DX_ROOT_API_KEY" not in source
 
 
 def test_provider_module_imports_no_sqlalchemy_and_no_dx_core() -> None:

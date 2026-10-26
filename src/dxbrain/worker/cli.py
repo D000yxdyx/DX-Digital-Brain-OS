@@ -52,6 +52,11 @@ def build_execution_handler(settings: WorkerSettings) -> Callable[[UUID], None] 
             executable=settings.codex_executable,
             workspace_resolver=workspace_resolver,
             disabled_mcp_servers=tuple(settings.codex_disabled_mcp_servers),
+            api_key=(
+                settings.codex_api_key.get_secret_value()
+                if settings.codex_api_key is not None
+                else None
+            ),
         )
     else:
         provider = FakeExecutionProvider()

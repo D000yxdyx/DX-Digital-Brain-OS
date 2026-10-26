@@ -37,6 +37,7 @@ from dxbrain.execution.fake import FakeExecutionProvider
 from dxbrain.execution.gateway import ExecutionGateway
 from dxbrain.operator.cli import (
     OperatorError,
+    build_execution_prompt,
     build_scope,
     parse_intent,
     require_single_step,
@@ -50,6 +51,7 @@ from dxbrain.operator.outbox_loop import (
 from dxbrain.worker.outbox import OutboxWorker
 
 # --- pure task-card contract -------------------------------------------------------
+
 
 class _Step:
     def __init__(self, id, ordinal, title, capability, parameters, status, result_summary=None):
@@ -129,7 +131,33 @@ def test_require_single_step_rejects_empty() -> None:
         require_single_step([])
 
 
+# --- R1: execution prompt contract ------------------------------------------------
+
+
+def test_build_execution_prompt_is_non_empty_and_deterministic() -> None:
+    prompt = build_execution_prompt("read the README", "read README.md")
+    assert isinstance(prompt, str) and prompt.strip()
+    assert "read the README" in prompt
+    assert "read README.md" in prompt
+
+
+def test_build_execution_prompt_fails_closed_on_blank_instruction() -> None:
+    with pytest.raises(OperatorError):
+        build_execution_prompt("   ", "step")
+
+
+def test_build_execution_prompt_fails_closed_on_blank_step() -> None:
+    with pytest.raises(OperatorError):
+        build_execution_prompt("instruction", "")
+
+
+def test_build_execution_prompt_fails_closed_on_none() -> None:
+    with pytest.raises(OperatorError):
+        build_execution_prompt(None, "step")  # type: ignore[arg-type]
+
+
 # --- create / approve composition + stable intent ---------------------------------
+
 
 def _seed_execution_parents(factory) -> dict[str, Any]:
     ids = {
@@ -155,7 +183,7 @@ def _seed_execution_parents(factory) -> dict[str, Any]:
                 requested_capabilities=["model.call", "agent.execution"],
                 plan=[{"title": "t", "capability": "agent.execution", "parameters": {}}],
                 actor_type="human",
-                actor_id="daryl",
+                actor_id="test-owner",
                 idempotency_key="seed-proposal",
                 request_hash="h",
             )
@@ -190,7 +218,7 @@ def _seed_execution_parents(factory) -> dict[str, Any]:
                 steps=[{"title": "t", "capability": "agent.execution", "parameters": {}}],
                 warnings=[],
                 actor_type="human",
-                actor_id="daryl",
+                actor_id="test-owner",
                 idempotency_key="seed-draft",
                 request_hash="h",
             )
@@ -204,7 +232,7 @@ def _seed_execution_parents(factory) -> dict[str, Any]:
                 scope={"capabilities": ["model.call", "agent.execution"]},
                 expires_at=datetime.now(UTC) + timedelta(hours=1),
                 actor_type="human",
-                actor_id="daryl",
+                actor_id="test-owner",
                 idempotency_key="seed-approval",
                 request_hash="h",
             )
@@ -218,7 +246,7 @@ def _seed_execution_parents(factory) -> dict[str, Any]:
                 draft_id=ids["draft_id"],
                 draft_revision=1,
                 actor_type="human",
-                actor_id="daryl",
+                actor_id="test-owner",
                 idempotency_key="seed-handoff",
                 request_hash="h",
             )
@@ -233,7 +261,7 @@ def _seed_execution_parents(factory) -> dict[str, Any]:
                 draft_id=ids["draft_id"],
                 draft_revision=1,
                 actor_type="human",
-                actor_id="daryl",
+                actor_id="test-owner",
                 idempotency_key="seed-run",
                 request_hash="h",
             )
@@ -271,7 +299,7 @@ def _create_requested(factory, *, provider: str = "fake") -> Any:
         workspace_ref="default",
         request_input={"title": "step", "capability": "agent.execution", "parameters": {}},
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key=f"exec-{uuid4()}",
     )
 
@@ -288,6 +316,7 @@ def _requested_event_id(factory, execution_id) -> Any:
 
 
 # --- bounded outbox drain ----------------------------------------------------------
+
 
 def test_drain_stops_when_target_leaves_requested(session_factories) -> None:
     api_factory, worker_factory, migration_factory = session_factories
@@ -373,7 +402,7 @@ def test_create_stores_stable_intent_in_proposal_scope(session_factories) -> Non
         title="read the textbook",
         description="read chapter one",
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="task-1",
     )
     proposal = governance.create_proposal(
@@ -384,7 +413,7 @@ def test_create_stores_stable_intent_in_proposal_scope(session_factories) -> Non
         requested_capabilities=["model.call", "agent.execution"],
         plan=[{"title": "t", "capability": "agent.execution", "parameters": {}}],
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="proposal-1",
     )
 
@@ -410,7 +439,10 @@ def test_approve_uses_stored_requested_capabilities(session_factories) -> None:
     tasks = TaskService(factory)
     governance = GovernanceService(factory)
     task = tasks.create_task(
-        title="t", description="d", actor_type="human", actor_id="daryl",
+        title="t",
+        description="d",
+        actor_type="human",
+        actor_id="test-owner",
         idempotency_key="task-1",
     )
     proposal = governance.create_proposal(
@@ -421,7 +453,7 @@ def test_approve_uses_stored_requested_capabilities(session_factories) -> None:
         requested_capabilities=["model.call", "agent.execution"],
         plan=[{"title": "t", "capability": "agent.execution", "parameters": {}}],
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="proposal-1",
     )
     governance.review_proposal(
@@ -430,7 +462,7 @@ def test_approve_uses_stored_requested_capabilities(session_factories) -> None:
         risk_level="low",
         reason="ok",
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="review-1",
     )
     grant = governance.grant_approval(
@@ -438,7 +470,7 @@ def test_approve_uses_stored_requested_capabilities(session_factories) -> None:
         scope={"capabilities": proposal.requested_capabilities},
         expires_at=datetime.now(UTC) + timedelta(hours=1),
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="approval-1",
     )
 
