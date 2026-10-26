@@ -33,7 +33,7 @@ from dxbrain.operator.cli import OperatorError, cmd_confirm, cmd_execute, cmd_pl
 # --- plan path ---------------------------------------------------------------------
 
 
-def _plan_args(proposal_id: str, actor_id: str = "daryl") -> argparse.Namespace:
+def _plan_args(proposal_id: str, actor_id: str = "test-owner") -> argparse.Namespace:
     return argparse.Namespace(proposal_id=proposal_id, actor_id=actor_id)
 
 
@@ -166,7 +166,12 @@ def test_cmd_confirm_rejects_multi_step(monkeypatch) -> None:
     ctx = SimpleNamespace(plan_drafts=drafts)
 
     with pytest.raises(OperatorError):
-        cmd_confirm(ctx, argparse.Namespace(draft_id=str(draft_id), actor_id="daryl", reason=None))
+        cmd_confirm(
+            ctx,
+            argparse.Namespace(
+                draft_id=str(draft_id), actor_id="test-owner", reason=None
+            ),
+        )
 
     # The draft must NOT have been promoted to confirmed.
     assert drafts.reviewed is False
@@ -304,7 +309,7 @@ def test_cmd_execute_restores_intent_and_creates_execution(monkeypatch) -> None:
     _patch_drain(monkeypatch)
 
     rc = cmd_execute(
-        ctx, argparse.Namespace(proposal_id=str(recording["proposal_id"]), actor_id="daryl")
+        ctx, argparse.Namespace(proposal_id=str(recording["proposal_id"]), actor_id="test-owner")
     )
 
     assert rc == 0
@@ -341,7 +346,10 @@ def test_cmd_execute_rejects_multi_step(monkeypatch) -> None:
 
     with pytest.raises(OperatorError):
         cmd_execute(
-            ctx, argparse.Namespace(proposal_id=str(recording["proposal_id"]), actor_id="daryl")
+            ctx,
+            argparse.Namespace(
+                proposal_id=str(recording["proposal_id"]), actor_id="test-owner"
+            ),
         )
 
     # No execution was created because the single-step gate fired first.
@@ -361,7 +369,7 @@ def test_cmd_execute_reaches_worker_only_via_bounded_loop(monkeypatch) -> None:
     _patch_drain(monkeypatch)
 
     rc = cmd_execute(
-        ctx, argparse.Namespace(proposal_id=str(recording["proposal_id"]), actor_id="daryl")
+        ctx, argparse.Namespace(proposal_id=str(recording["proposal_id"]), actor_id="test-owner")
     )
     assert rc == 0
     # The bounded loop was invoked (the only sanctioned worker path). cmd_execute does
@@ -398,7 +406,10 @@ def test_cmd_execute_bounds_provider_failure(monkeypatch) -> None:
 
     with pytest.raises(OperatorError) as exc_info:
         cmd_execute(
-            ctx, argparse.Namespace(proposal_id=str(recording["proposal_id"]), actor_id="daryl")
+            ctx,
+            argparse.Namespace(
+                proposal_id=str(recording["proposal_id"]), actor_id="test-owner"
+            ),
         )
 
     # The failure is bounded (OperatorError), and the underlying class/state are kept

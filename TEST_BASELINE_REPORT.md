@@ -268,4 +268,4 @@ Baseline verdict:                    PASS
 - 未修改 WSL policy、未修改 Docker 配置
 - WSL runtime status 仍为 **UNVERIFIED**
 
-下一步（ADR-0010 → Execution Gateway contracts → persistence → outbox → worker → offline/fake adapter → tests）等待 Daryl 批准。
+下一步（ADR-0010 → Execution Gateway contracts → persistence → outbox → worker → offline/fake adapter → tests）等待 Owner 批准。

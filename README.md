@@ -1,101 +1,126 @@
 # DX Digital Brain OS — Kernel Tracer Bullet v0.1
 
-This repository is the deliberately small, verifiable kernel of DX Digital Brain OS. It proves auditable task, governance, memory-record, model-call, plan-review, and contract-only Workflow paths before autonomous Agents, external tools, Redis, vectors, or scheduling are introduced.
+DX Digital Brain OS is an early software prototype for human-governed AI-assisted workflows. It is intended for local development and evaluation. It has not received a production security review, operational acceptance, or independent deployment validation. It provides no production-environment security guarantee.
 
-## Scope
+This candidate is licensed under the MIT License; see [LICENSE](LICENSE). The grant covers project-authored files in this candidate. Third-party packages remain under their own license terms.
 
-Included: PostgreSQL 18, Alembic, FastAPI task creation/query, atomic state/event/outbox/audit writes, a lease-based idempotent internal-event worker, the deterministic Governance Contract Foundation, the task-level Archive/Retrospective Contract Foundation, structured plan review/versioning, a contract-only sequential Workflow state machine, and transport-injected offline adapters for DeepSeek/Anthropic request and response contracts. Excluded: Redis, pgvector, Qdrant, Ollama, LangGraph, Agent runtime, dashboard write controls, external tools, autonomous scheduling, and outbound integrations.
+The two historical reports formerly under `archive/` are omitted from this candidate while their quotation and redistribution rights remain unverified.
 
-## Prerequisites
+## Feature status
 
-- Python 3.12 (Windows launcher command: `py -3.12`)
-- Docker Desktop with the WSL 2 backend running
+### Implemented in the repository
 
-## Local startup
+- FastAPI task APIs backed by PostgreSQL and Alembic migrations.
+- Idempotency, task-state transitions, domain events, an outbox, and an internal worker.
+- Governance proposals, review/approval records, execution reports, and audit records.
+- Plan drafts, revisions, human review, and revision-pinned workflow handoffs.
+- A sequential bookkeeping Workflow state machine. It does not execute external capabilities.
+- Archive and retrospective record contracts.
+- DeepSeek and Anthropic adapters with injected HTTP transport for offline tests.
+- A read-only React Control UI.
+- A bounded Codex CLI execution provider. The path is gated by the worker configuration and pre-dispatch checks, uses a resolved workspace, and starts Codex in read-only sandbox mode. The provider exists in code; full operational and production validation has not been performed.
 
-1. Copy `.env.example` to `.env` and replace every password/key with local development secrets.
-2. Create a virtual environment and install dependencies:
+### Gated or not fully verified
 
-   ```powershell
-   py -3.12 -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   python -m pip install --upgrade pip
-   pip install -e ".[dev]"
-   ```
+- Live model calls are disabled by default. One historical low-risk call was previously reported, but this repository does not include repeatable evidence for it. Treat live provider behavior as unverified.
+- Real Codex execution is disabled by default. It requires explicit worker configuration, a valid approval/capability/workspace mapping, and a local Codex installation. Do not enable it against sensitive workspaces.
+- The Codex provider currently accepts a native Windows `.exe`; Linux and macOS Codex execution are not supported by its current executable validator and have not been verified.
+- Database migration and API startup instructions below are documented; this README does not claim a clean-machine install or production deployment has been validated.
 
-3. Start PostgreSQL and wait for its health check:
+### Not implemented or out of scope
 
-   ```powershell
-   docker compose up -d postgres
-   docker compose ps
-   ```
+- Autonomous multi-agent runtime, automatic scheduling, and automatic approval.
+- External tool execution from the bookkeeping Workflow.
+- Redis, vector databases, Qdrant, Ollama, and LangGraph integrations.
+- Production identity management, multi-tenant authorization, high availability, or an operational support service.
 
-4. Apply schema using the migration role, then run FastAPI with the API role:
+## Requirements
 
-   ```powershell
-   $env:DX_DATABASE_URL = (Get-Content .env | Select-String '^DX_DATABASE_URL_MIGRATION=').ToString().Split('=',2)[1]
-   alembic upgrade head
-   $env:DX_DATABASE_URL = (Get-Content .env | Select-String '^DX_DATABASE_URL_API=').ToString().Split('=',2)[1]
-   uvicorn dxbrain.api.app:app --reload
-   ```
+- Python 3.12 or a supported version allowed by pyproject.toml.
+- Docker Desktop or another Docker Compose installation with PostgreSQL 18.6 support.
+- Node.js and npm compatible with the Vite version in the committed UI lockfile.
 
-5. Send `X-DX-API-Key` equal to `DX_ROOT_API_KEY` and an `Idempotency-Key`:
+Python dependencies are specified as version ranges and are not pinned in a Python lockfile. The UI has package-lock.json; use npm ci for a lockfile-based UI install.
 
-   ```powershell
-   Invoke-RestMethod http://127.0.0.1:8000/v1/tasks -Method POST -Headers @{ 'X-DX-API-Key' = '<key>'; 'Idempotency-Key' = 'demo-001' } -ContentType 'application/json' -Body '{"title":"Trace the kernel"}'
-   ```
+## Minimal local run
 
-To consume one internal event, open a separate terminal and run:
+These steps create local development state. Never point them at a production or shared database.
 
-```powershell
-$env:DX_WORKER_DATABASE_URL = (Get-Content .env | Select-String '^DX_DATABASE_URL_WORKER=').ToString().Split('=',2)[1]
-dxbrain-worker
-```
+1. Create .env only if it does not already exist, then edit it with local development values. Keep real values out of Git.
 
-## Verification
+       if (!(Test-Path .env)) { Copy-Item .env.example .env }
 
-Run the migration first, then execute integration tests against the local database:
+2. Create a virtual environment and install the Python package and development tools.
 
-```powershell
-$env:DX_ROOT_API_KEY = (Get-Content .env | Select-String '^DX_ROOT_API_KEY=').ToString().Split('=',2)[1]
-$env:DX_TEST_DATABASE_URL = (Get-Content .env | Select-String '^DX_TEST_DATABASE_URL=').ToString().Split('=',2)[1]
-$env:DX_TEST_WORKER_DATABASE_URL = (Get-Content .env | Select-String '^DX_TEST_WORKER_DATABASE_URL=').ToString().Split('=',2)[1]
-$env:DX_TEST_MIGRATION_DATABASE_URL = (Get-Content .env | Select-String '^DX_TEST_MIGRATION_DATABASE_URL=').ToString().Split('=',2)[1]
-pytest
-```
+       py -3.12 -m venv .venv
+       .\.venv\Scripts\Activate.ps1
+       python -m pip install --upgrade pip
+       python -m pip install -e ".[dev]"
 
-Tests refuse to run against `dxbrain`; they recreate schema only in the disposable `dxbrain_test` database.
+3. Start PostgreSQL. Compose binds the database to loopback by default.
 
-For persistence, create a task, run `docker compose restart postgres`, then query the same task. The named volume is mounted at `/var/lib/postgresql`, the PostgreSQL 18-compatible mount point.
+       docker compose up -d postgres
+       docker compose ps
 
-## Role boundary
+4. Apply migrations with the migration-role DSN from your local .env. Replace the placeholder with the local value in your shell; do not commit it.
 
-`dx_bootstrap` initializes roles only. `dx_migration` owns schema migrations. FastAPI uses `dx_api`; the worker uses `dx_worker`. Neither runtime role is a superuser, and the API role has no `UPDATE`, `DELETE`, or `TRUNCATE` privilege on the audit table. See [ARCHITECTURE.md](ARCHITECTURE.md) and [DATABASE_DESIGN.md](DATABASE_DESIGN.md).
+       $env:DX_DATABASE_URL = "<migration-role DSN>"
+       python -m alembic upgrade head
 
-The responsibility-level contract is recorded in [MODULE_DESIGN.md](MODULE_DESIGN.md).
+5. Start the API with the API-role DSN and a local root API key.
 
-The accepted future governance and frontend boundary is recorded in [ADR-0001](ADR-0001-governance-and-control-ui.md). The Three-Province/Six-Ministry reference evaluation and non-adoption boundary are recorded in [ADR-0002](ADR-0002-three-province-reference-evaluation.md). The proposed organizational model is recorded in [ADR-0003](ADR-0003-organizational-architecture.md), and the proposed archive/retrospective boundary in [ADR-0004](ADR-0004-records-retrospective-memory.md).
+       $env:DX_DATABASE_URL = "<API-role DSN>"
+       $env:DX_ROOT_API_KEY = "<local development key>"
+       python -m uvicorn dxbrain.api.app:app --reload --host 127.0.0.1
 
-## Read-only Control UI
+6. Create a task from a second PowerShell terminal.
 
-The first Control UI slice lives in `apps/control-ui`. It reads the authenticated FastAPI projections at `/v1/control/overview`, `/v1/control/tasks`, `/v1/tasks/{task_id}`, and the proposal/review/approval/execution-report routes; it never connects to PostgreSQL and has no mutating controls.
+       Invoke-RestMethod http://127.0.0.1:8000/v1/tasks -Method POST -Headers @{ 'X-DX-API-Key' = '<local development key>'; 'Idempotency-Key' = 'demo-001' } -ContentType 'application/json' -Body '{"title":"Trace the kernel"}'
 
-```powershell
-cd apps/control-ui
-npm install
-npm run dev
-```
+The worker is a separate one-event command. It uses DX_WORKER_DATABASE_URL; the optional execution gateway uses the separate DX_EXECUTION_DATABASE_URL principal. Real Codex execution remains disabled unless explicitly configured and authorized.
 
-Open `http://127.0.0.1:5173`, enter the local API address and `DX_ROOT_API_KEY`, then select a task to view its state timeline, governance chain, project dossier, retrospective, and validated lessons. The UI remains read-only; archive and retrospective routes are not exposed as mutating controls. The key is held only in the current tab. Configure additional development origins with `DX_CONTROL_UI_ORIGINS` if needed.
+## Control UI
 
-On Windows, `DX Digital Brain OS Control UI.lnk` on the Desktop starts both local services and opens the console. The launcher reads credentials from the local `.env` file in memory; it does not embed the API key in the shortcut. Service output is written to `runtime/logs/`.
+The UI is read-only and communicates with the local API. From the repository root:
 
-## Optional model providers
+       cd apps/control-ui
+       npm ci
+       npm run dev -- --host 127.0.0.1
 
-The control UI API address is still the local DX API (`http://127.0.0.1:8000`); provider keys are server-side settings and are not entered into the UI key field. To configure providers, copy the optional `DEEPSEEK_*` and `ANTHROPIC_*` values from `.env.example` into the local `.env`. The read-only endpoint `/v1/control/model-providers` reports only provider readiness, base URL, transport, and default model; it never returns a key.
+Open the local Vite address printed by the command and provide the local API address and key. The UI keeps the key in the current tab; it does not store it in local storage.
 
-The initial policy defaults to DeepSeek for planning and Claude for review. The dry-run planner endpoint (`POST /v1/proposals/{proposal_id}/dry-run-plan`) records a model-call audit row but returns the proposal plan without inference or network access. The read-only preflight endpoint (`GET /v1/proposals/{proposal_id}/model-readiness`) explains whether configuration, provider readiness, an active approval, and the `model.call` capability are all present. The live ledger endpoints prepare, execute one explicit HTTP attempt, and finalize a call; they remain blocked while `DX_LLM_LIVE_ENABLED=false`. One low-risk DeepSeek planner call has been validated under this gate; broader outbound use still requires explicit policy, timeout, retry, usage, and audit controls.
-The structured plan checkpoint (`POST /v1/model-calls/{model_call_id}/parse-plan`) turns succeeded planner text into a bounded `candidate` draft. A human must explicitly confirm or reject it through `POST /v1/plan-drafts/{draft_id}/review`; this does not start Workflow or rewrite the proposal.
-Human edits are versioned through `POST /v1/plan-drafts/{draft_id}/edit` and listed through `/revisions`. Once confirmed, `POST /v1/plan-drafts/{draft_id}/workflow-handoff` records a revision-pinned `requested` handoff only; no scheduler or executor is enabled yet.
-The bookkeeping Workflow MVP accepts that handoff with `POST /v1/workflow-handoffs/{handoff_id}/accept`, then advances one step boundary at a time through `POST /v1/workflow-runs/{run_id}/advance`. Pause and cancel are explicit human commands; no external capability is executed.
-The Agent contract MVP registers a task-scoped Agent through `POST /v1/tasks/{task_id}/agents`, controls lifecycle through `/v1/agents/{agent_id}/lifecycle`, and exposes a read-only declared-capability check. Registration does not start a model runtime or grant external side effects.
+## Codex CLI environment
+
+The worker passes Codex a small environment allowlist for OS startup, locale, certificates, and the Codex profile path. Ambient database URLs, DX_ROOT_API_KEY, and ambient model-provider keys are not forwarded. Codex account sign-in uses its own local profile, located through the preserved home/profile variables or CODEX_HOME.
+
+If API-key authentication is needed, configure a dedicated DX_CODEX_API_KEY. Only this explicit setting is mapped to OPENAI_API_KEY for the Codex child. Do not reuse a database, DX root, DeepSeek, Anthropic, or unrelated OpenAI application key. Proxy environment variables are not inherited because they may carry credentials or internal routing information.
+
+## Tests
+
+### Offline tests
+
+The following subset avoids the autouse database fixtures and makes no real provider calls:
+
+       $env:DX_DATABASE_URL = "postgresql+psycopg://dx_api:offline-placeholder@127.0.0.1/dxbrain_test"
+       $env:DX_ROOT_API_KEY = "offline-placeholder"
+       python -m pytest --noconftest -p no:cacheprovider tests/test_execution_workspace.py tests/test_execution_codex_provider.py tests/test_provider_adapters.py tests/test_providers.py -k "not provider_status_endpoint"
+
+The placeholder values satisfy module-level application configuration only. This command skips the database fixtures and provider-status endpoint, so it does not connect to PostgreSQL or call the Codex CLI.
+
+### Database integration tests
+
+The full suite is destructive to its configured test schema: tests downgrade and upgrade the schema and truncate test tables. Run it only against a newly created, disposable database named dxbrain_test, with all three DX_TEST_DATABASE_URL, DX_TEST_WORKER_DATABASE_URL, and DX_TEST_MIGRATION_DATABASE_URL values set to that database's appropriate roles. Never point these variables at a production, shared, or existing business database. The fixture rejects a database whose name is not dxbrain_test; that check does not prove the database contains no valuable data.
+
+### UI type check
+
+From apps/control-ui after npm ci:
+
+       npx tsc --noEmit -p tsconfig.app.json --pretty false
+
+## Security and contributions
+
+See [SECURITY.md](SECURITY.md) for the current vulnerability-reporting boundary and [CONTRIBUTING.md](CONTRIBUTING.md) for local checks and contribution guidance. No response-time commitment or production support is provided.
+
+## Architecture notes
+
+See ARCHITECTURE.md, DATABASE_DESIGN.md, MODULE_DESIGN.md, and ROADMAP.md. The archived reports are excluded from this candidate; earlier Git history still contains them, and no history rewrite has been performed.

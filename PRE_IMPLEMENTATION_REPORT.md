@@ -1,9 +1,10 @@
 # PRE_IMPLEMENTATION_REPORT — Agent Execution Bridge v0.2
 
 - 日期：2026-09-21
+- 安全编辑说明（2026-10-26）：此工作树版本已移除本机账户标识、绝对路径、CLI 安装位置及主机监听端口清单；旧提交未改写，历史版本仍可能可见。
 - 阶段：Phase 0 只读检查（未修改任何文件，未执行任何写操作）
 - 执行角色：本地 DevOps / 平台工程师
-- 结论先行：**当前存在 3 个阻塞项，必须先由 Daryl 决策或处理，才能进入 Phase 1。** 详见第 6 节。
+- 结论先行：**当时存在 3 个阻塞项，须由 Owner 决策或处理，才能进入 Phase 1。** 详见第 6 节。
 
 ---
 
@@ -29,7 +30,7 @@
 
 | 项 | 实测值 |
 |---|---|
-| 路径 | `E:\DX Digital Brain OS` |
+| 路径 | local project checkout（machine-specific path omitted） |
 | 当前分支 | **`master`**（不是 `main`） |
 | 远端 | **无 remote 配置**（`git remote -v` 为空） |
 | 提交数 | 5，最新 `9b6eb20 Add concurrency regression test for execute_prepared locking fix` |
@@ -50,27 +51,11 @@ MM tests/test_model_calls.py     # 暂存区删除了并发回归测试；工作
 
 ### 1.2 运行时环境
 
-| 项 | 实测值 | 状态 |
-|---|---|---|
-| Python | `py -3.12` → 3.12.10；`.venv/Scripts/python.exe` → 3.12.10 | 正常，venv 已含 `alembic.exe`、`dxbrain-worker.exe` |
-| Node | v22.22.2 | 正常 |
-| npm | 10.9.7 | 正常 |
-| Docker CLI | 29.7.2 | 已安装 |
-| Docker Compose | v5.4.0 | 已安装 |
-| **Docker daemon** | **`failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine`** | **未运行** |
-| **WSL** | **`wsl.exe` 被沙箱安全策略拦截（Program Blacklist）** | **无法验证** |
-| PostgreSQL 容器 | 无（`docker ps -a` 因 daemon 未运行而无法查询） | **不可用** |
-| 端口 5432 / 8000 / 5173 | 均无 LISTENING | 空闲 |
-| 已占用端口（节选） | 53, 135, 445, 1236, 2179, 5040, 7680, 8011, 22331, 23031, 24031, 49664–49669, 56139, 62927, 4001, 4003, 4301, 4303, 4310, 4312, 4709, 5283, 7897 | — |
+主机软件版本、服务状态、网络监听和工具安装位置均为机器专属信息，已从此副本移除。本节不描述当前运行环境；通用前置条件见 README.md。
 
-### 1.3 CLI 工具存在性（仅 `command -v` 探测，未执行、未消耗额度）
+### 1.3 CLI 工具检查（历史记录）
 
-| 工具 | 路径 | 本轮处理 |
-|---|---|---|
-| `multica` | **未安装** | Phase 6 待安装 |
-| `codex` | `C:\nvm4w\nodejs\codex` | **已存在，本轮禁止调用** |
-| `claude` | `C:\Users\Daryl\.local\bin\claude` | **已存在，本轮禁止调用** |
-| `ollama` | `C:\Users\Daryl\AppData\Local\Programs\Ollama\ollama` | 已存在，本轮不调用 |
+CLI 可用性和安装路径均已省略；本节不代表当前工具状态。
 
 ### 1.4 架构现状
 
@@ -182,7 +167,7 @@ sssssssssssssssssssssssssssss                                        [100%]
 |---|---|---|
 | P0 | `PRE_IMPLEMENTATION_REPORT.md` | 新增（本文件） |
 | P1 | （无文件，仅分支操作） | 创建 `feat/agent-execution-bridge-v02` |
-| P2 | `ADR-000N-agent-execution-gateway.md` | 新增，编号待 Daryl 确认（建议 `ADR-0010`） |
+| P2 | `ADR-000N-agent-execution-gateway.md` | 新增，编号待 Owner 确认（建议 `ADR-0010`） |
 | P2 | `AGENT_EXECUTION_DESIGN.md` | 新增 |
 | P2 | `MULTICA_INTEGRATION.md` | 新增（含 Phase 7 self-host 调研） |
 | P3 | `src/dxbrain/core/executions.py`（或 `execution/`） | 新增：ExecutionRequest / ExecutionResult / Provider Protocol |
@@ -197,11 +182,11 @@ sssssssssssssssssssssssssssss                                        [100%]
 | P10 | `apps/control-ui/src/main.tsx` | 追加只读展示区（不改既有面板） |
 | P11 | `IMPLEMENTATION_REPORT.md`、`README.md` | 新增 / 更新 |
 
-**关于 `Execution Gateway` 的落位建议（待确认）**：现有 `dxbrain/providers/` 已专用于 **model provider**（DeepSeek / Anthropic）。把 execution provider 塞进去会混淆两条完全不同语义的通道。倾向新建 `src/dxbrain/execution/`（gateway + adapters + registry），与 `providers/` 平行。这需要 Daryl 拍板，因为它决定了后续所有 import 路径。
+**关于 `Execution Gateway` 的落位建议（待确认）**：现有 `dxbrain/providers/` 已专用于 **model provider**（DeepSeek / Anthropic）。把 execution provider 塞进去会混淆两条完全不同语义的通道。倾向新建 `src/dxbrain/execution/`（gateway + adapters + registry），与 `providers/` 平行。这需要 Owner 决策，因为它决定了后续所有 import 路径。
 
 ---
 
-## 6. 阻塞项 — 需要 Daryl 决策（三个）
+## 6. 阻塞项 — 需要 Owner 决策（三个）
 
 ### 阻塞 1：工作区不干净（Phase 1 门禁）
 
@@ -264,4 +249,4 @@ sssssssssssssssssssssssssssss                                        [100%]
 
 ## 9. 下一步
 
-等待 Daryl 对第 6 节的三个阻塞项给出决策后，进入 Phase 1。
+等待 Owner 对第 6 节的三个阻塞项给出决策后，进入 Phase 1。

@@ -149,7 +149,7 @@ def _seed_agent(
             target_status="active",
             reason="guard test activation",
             actor_type="human",
-            actor_id="daryl",
+            actor_id="test-owner",
             idempotency_key=f"seed-lifecycle-{uuid4()}",
         )
     return view.id

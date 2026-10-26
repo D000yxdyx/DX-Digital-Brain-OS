@@ -207,7 +207,7 @@ def test_accept_review_on_succeeded_execution(session_factories) -> None:
         decision="accepted",
         reason="looks good",
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="review-1",
     )
 
@@ -225,7 +225,7 @@ def test_reject_review_on_succeeded_execution_keeps_succeeded(session_factories)
         decision="rejected",
         reason="wrong result",
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="review-1",
     )
 
@@ -264,7 +264,7 @@ def test_review_of_non_succeeded_execution_rejected(session_factories, status: s
             decision="accepted",
             reason="x",
             actor_type="human",
-            actor_id="daryl",
+            actor_id="test-owner",
             idempotency_key="review-1",
         )
 
@@ -280,7 +280,7 @@ def test_invalid_decision_rejected(session_factories) -> None:
             decision="needs_changes",  # type: ignore[arg-type]
             reason="x",
             actor_type="human",
-            actor_id="daryl",
+            actor_id="test-owner",
             idempotency_key="review-1",
         )
 
@@ -295,7 +295,7 @@ def test_duplicate_identical_review_replays(session_factories) -> None:
         decision="accepted",
         reason="ok",
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="review-1",
     )
     second = service.record_decision(
@@ -303,7 +303,7 @@ def test_duplicate_identical_review_replays(session_factories) -> None:
         decision="accepted",
         reason="ok",
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="review-1",
     )
 
@@ -322,7 +322,7 @@ def test_conflicting_second_review_fails_closed(session_factories) -> None:
         decision="accepted",
         reason="ok",
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="review-1",
     )
 
@@ -332,7 +332,7 @@ def test_conflicting_second_review_fails_closed(session_factories) -> None:
             decision="rejected",
             reason="changed my mind",
             actor_type="human",
-            actor_id="daryl",
+            actor_id="test-owner",
             idempotency_key="review-2",
         )
 
@@ -351,7 +351,7 @@ def test_review_emits_audit_and_outbox(session_factories) -> None:
         decision="accepted",
         reason="ok",
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="review-1",
     )
 
@@ -384,6 +384,6 @@ def test_missing_execution_rejected(session_factories) -> None:
             decision="accepted",
             reason="x",
             actor_type="human",
-            actor_id="daryl",
+            actor_id="test-owner",
             idempotency_key="review-1",
         )

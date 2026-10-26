@@ -183,7 +183,7 @@ def _seed_execution_parents(factory) -> dict[str, Any]:
                 requested_capabilities=["model.call", "agent.execution"],
                 plan=[{"title": "t", "capability": "agent.execution", "parameters": {}}],
                 actor_type="human",
-                actor_id="daryl",
+                actor_id="test-owner",
                 idempotency_key="seed-proposal",
                 request_hash="h",
             )
@@ -218,7 +218,7 @@ def _seed_execution_parents(factory) -> dict[str, Any]:
                 steps=[{"title": "t", "capability": "agent.execution", "parameters": {}}],
                 warnings=[],
                 actor_type="human",
-                actor_id="daryl",
+                actor_id="test-owner",
                 idempotency_key="seed-draft",
                 request_hash="h",
             )
@@ -232,7 +232,7 @@ def _seed_execution_parents(factory) -> dict[str, Any]:
                 scope={"capabilities": ["model.call", "agent.execution"]},
                 expires_at=datetime.now(UTC) + timedelta(hours=1),
                 actor_type="human",
-                actor_id="daryl",
+                actor_id="test-owner",
                 idempotency_key="seed-approval",
                 request_hash="h",
             )
@@ -246,7 +246,7 @@ def _seed_execution_parents(factory) -> dict[str, Any]:
                 draft_id=ids["draft_id"],
                 draft_revision=1,
                 actor_type="human",
-                actor_id="daryl",
+                actor_id="test-owner",
                 idempotency_key="seed-handoff",
                 request_hash="h",
             )
@@ -261,7 +261,7 @@ def _seed_execution_parents(factory) -> dict[str, Any]:
                 draft_id=ids["draft_id"],
                 draft_revision=1,
                 actor_type="human",
-                actor_id="daryl",
+                actor_id="test-owner",
                 idempotency_key="seed-run",
                 request_hash="h",
             )
@@ -299,7 +299,7 @@ def _create_requested(factory, *, provider: str = "fake") -> Any:
         workspace_ref="default",
         request_input={"title": "step", "capability": "agent.execution", "parameters": {}},
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key=f"exec-{uuid4()}",
     )
 
@@ -402,7 +402,7 @@ def test_create_stores_stable_intent_in_proposal_scope(session_factories) -> Non
         title="read the textbook",
         description="read chapter one",
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="task-1",
     )
     proposal = governance.create_proposal(
@@ -413,7 +413,7 @@ def test_create_stores_stable_intent_in_proposal_scope(session_factories) -> Non
         requested_capabilities=["model.call", "agent.execution"],
         plan=[{"title": "t", "capability": "agent.execution", "parameters": {}}],
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="proposal-1",
     )
 
@@ -442,7 +442,7 @@ def test_approve_uses_stored_requested_capabilities(session_factories) -> None:
         title="t",
         description="d",
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="task-1",
     )
     proposal = governance.create_proposal(
@@ -453,7 +453,7 @@ def test_approve_uses_stored_requested_capabilities(session_factories) -> None:
         requested_capabilities=["model.call", "agent.execution"],
         plan=[{"title": "t", "capability": "agent.execution", "parameters": {}}],
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="proposal-1",
     )
     governance.review_proposal(
@@ -462,7 +462,7 @@ def test_approve_uses_stored_requested_capabilities(session_factories) -> None:
         risk_level="low",
         reason="ok",
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="review-1",
     )
     grant = governance.grant_approval(
@@ -470,7 +470,7 @@ def test_approve_uses_stored_requested_capabilities(session_factories) -> None:
         scope={"capabilities": proposal.requested_capabilities},
         expires_at=datetime.now(UTC) + timedelta(hours=1),
         actor_type="human",
-        actor_id="daryl",
+        actor_id="test-owner",
         idempotency_key="approval-1",
     )
 
